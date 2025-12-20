@@ -1,4 +1,4 @@
-# DFQ: CAM-Based Dynamic Queue Manager
+# DFQ: Dynamic Per-Flow Queue Manager
 
 - Overview: Flow-oriented queue management using a CAM table to maintain per-flow head/tail pointers and depth. `PCP` maps to three priority queues, and an arbiter selects outputs.
 - Use cases: High-throughput data paths requiring flow- and priority-ordered enqueue/dequeue, such as network devices or on-chip networks.
