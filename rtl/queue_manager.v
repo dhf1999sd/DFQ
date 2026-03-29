@@ -1,22 +1,13 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// Company:
-// Engineer:
-//
-// Create Date: 2024/05/07 21:23:04
-// Design Name:
-// Module Name: queue_manager
-// Project Name:
-// Target Devices:
-// Tool Versions:
-// Description:
-//
-// Dependencies:
-//
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-//
+// Company:         NNS@TSN
+// Engineer:        Wenxue Wu
+// Create Date:     2024/05/07
+// Module Name:     queue_manager
+// Project Name:    Dynamic per flow queues
+// Target Devices:  Zynq
+// Tool Versions:   VIVADO 2023.2
+// Description:     Top-level DFQ queue manager with CAM, pointer RAM, and arbiter
 //////////////////////////////////////////////////////////////////////////////////
 
 
@@ -310,7 +301,7 @@ module queue_manager #(
           cam_wr_tail[0] <= 0;
           cam_wr_tail[1] <= 0;
           cam_wr_tail[2] <= 0;
-    
+
           if (ptr_wr)
           begin
             if (wr_PCP == 0 | 1 | 2 | 3)

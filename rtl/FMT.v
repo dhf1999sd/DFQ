@@ -1,58 +1,49 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// Company:
-// Engineer:
-//
-// Create Date: 2024/05/07 22:05:26
-// Design Name:
-// Module Name: FMT
-// Project Name:
-// Target Devices:
-// Tool Versions:
-// Description: CAM表管理模块，支持初始化�?�写入�?�查找�?�刷新等操作
-//
-// Dependencies:
-//
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-//
+// Company:         NNS@TSN
+// Engineer:        Wenxue Wu
+// Create Date:     2024/05/07
+// Module Name:     FMT
+// Project Name:    Dynamic per flow queues
+// Target Devices:  Zynq
+// Tool Versions:   VIVADO 2023.2
+// Description:     CAM table manager supporting initialization, write, search, and refresh
 //////////////////////////////////////////////////////////////////////////////////
 
 module FMT #(
-    parameter NUM_ENTRY = 32, // CAM表项数目
-    parameter ENTRY_WIDTH = 77 // CAM表项宽度，包含流ID、头指针、尾指针、深度标志等信息
-  )(
-    input              clk,                   // 时钟
-    input              reset,                 // 异步复位
-    input              init_req,              // 初始化请
-    output reg         init_ack,              // 初始化完成应�??
-    input              cam_wr_search,         // 查找请求
-    output reg         cam_matched,           // 查找命中
-    output reg         cam_mismatched,        // 查找未命�??
-    output reg  [19:0]  cam_match_tail,        // 命中项尾指针
-    output reg  [3:0]  cam_match_addr,        // 命中项地�??
-    input       [19:0]  cam_refresh_tail,      // 刷新尾指�??
-    input              depth_flag,            // 深度标志
-    input              cam_wr_search_ack,     // 查找应答
-    input              cam_wr_head_req,       // 写头请求
-    input       [19:0]  cam_wr_head,           // 写头指针
-    input              cam_wr_tail_req,       // 写尾请求
-    input       [19:0]  cam_wr_tail,           // 写尾指针
-    input      [31:0]  flow_ID,               // 流ID
-    output reg         ptr_read,              // 指针读取使能
-    output reg  [19:0]  cam_read_head,         // CAM读取头指�??
-    output reg         read_mode_flag,        // 读取模式标志
-    input       [19:0]  cam_refresh_head,      // 刷新头指�??
-    input              cam_refresh_head_flag  // 刷新头标�??
+    parameter NUM_ENTRY = 32,   // Number of CAM entries
+    parameter ENTRY_WIDTH = 77  // Entry width including flow ID, head pointer, tail pointer, and depth flag
+) (
+    input               clk,                    // Clock
+    input               reset,                  // Asynchronous reset
+    input               init_req,               // Initialization request
+    output reg          init_ack,               // Initialization acknowledge
+    input               cam_wr_search,          // Search request
+    output reg          cam_matched,            // Search matched
+    output reg          cam_mismatched,         // Search mismatched
+    output reg  [19:0]  cam_match_tail,         // Tail pointer of matched entry
+    output reg  [3:0]   cam_match_addr,         // Address of matched entry
+    input       [19:0]  cam_refresh_tail,       // Refresh tail pointer
+    input               depth_flag,             // Depth flag
+    input               cam_wr_search_ack,      // Search acknowledge
+    input               cam_wr_head_req,        // Write head request
+    input       [19:0]  cam_wr_head,            // Write head pointer
+    input               cam_wr_tail_req,        // Write tail request
+    input       [19:0]  cam_wr_tail,            // Write tail pointer
+    input       [31:0]  flow_ID,                // Flow ID
+    output reg          ptr_read,               // Pointer read enable
+    output reg  [19:0]  cam_read_head,          // CAM read head pointer
+    output reg          read_mode_flag,         // Read mode flag
+    input       [19:0]  cam_refresh_head,       // Refresh head pointer
+    input               cam_refresh_head_flag   // Refresh head flag
   );
 
-  // 内部寄存器和变量声明
+  // Internal registers and variable declarations
   reg  [3:0]  cam_addr_fifo_din;
   reg         cam_addr_fifo_wr;
   reg         cam_addr_fifo_rd;
   wire [3:0]  cam_addr_fifo_dout;
-  // CAM表项宽度调整为77
+  // CAM entry width is configured as 77 bits
   reg  [ENTRY_WIDTH-1:0] cam [0:NUM_ENTRY-1];
   reg  [ENTRY_WIDTH-1:0] cam_scheduler [0:NUM_ENTRY-1];
   reg  [3:0]  state;
@@ -60,13 +51,13 @@ module FMT #(
   reg  [3:0]  cam_read_addr;
   integer     i, j, m, k, r;
 
-  // 查找结果寄存�??
+  // Search result registers
   reg         cam_matched_reg;
   reg         cam_mismatched_reg;
   reg  [19:0]  cam_match_tail_reg;
   reg  [3:0]  cam_match_addr_reg;
 
-  // 状�?�机
+  // State machine
   always @(posedge clk)
   begin
     if (reset)
@@ -174,14 +165,14 @@ module FMT #(
     end
   end
 
-  // cam_scheduler同步
+  // cam_scheduler synchronization
   always @(*)
   begin
     for (k = 0; k < NUM_ENTRY; k = k + 1)
       cam_scheduler[k] = cam[k];
   end
 
-  // 查找逻辑
+  // Search logic
   always @(posedge clk)
   begin
     if (reset)
@@ -227,7 +218,7 @@ module FMT #(
     end
   end
 
-  // 指针读取逻辑
+  // Pointer read logic
   always @(posedge clk)
   begin
     if (reset)
@@ -257,7 +248,7 @@ module FMT #(
     end
   end
 
-  // FIFO实例
+  // FIFO instance
   FMT_fifo_ft u_fifo_ft_w4_d16 (
                 .clk       (clk),
                 .rst       (reset),

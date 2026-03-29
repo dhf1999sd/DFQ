@@ -1,29 +1,19 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// Company:
-// Engineer:
-//
-// Create Date: 2024/05/15 16:43:21
-// Design Name: DFQ CAM Dequeue Process
-// Module Name: dequeue_process
-// Project Name: DFQ_CAM_v5
-// Target Devices:
-// Tool Versions:
-// Description: Dequeue process module for DFQ CAM system with FSM control
-//              Handles reading from pointer RAM and managing queue operations
-//
-// Dependencies:
-//
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-//
+// Company:         NNS@TSN
+// Engineer:        Wenxue Wu
+// Create Date:     2024/05/15
+// Module Name:     dequeue_process
+// Project Name:    Dynamic per flow queues
+// Target Devices:  Zynq
+// Tool Versions:   VIVADO 2023.2
+// Description:     Dequeue process with FSM control for pointer RAM and CAM refresh
 //////////////////////////////////////////////////////////////////////////////////
 
 module dequeue_process #(
     parameter DATA_WIDTH = 20,
     parameter ADDR_WIDTH = 10
-  )(
+) (
     // Clock and Reset
     input  wire                     clk,
     input  wire                     reset,
