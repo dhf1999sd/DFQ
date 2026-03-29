@@ -13,7 +13,7 @@
 module dequeue_process #(
     parameter DATA_WIDTH = 20,
     parameter ADDR_WIDTH = 10
-) (
+  ) (
     // Clock and Reset
     input  wire                     clk,
     input  wire                     reset,

@@ -13,7 +13,7 @@
 module FMT #(
     parameter NUM_ENTRY = 32,   // Number of CAM entries
     parameter ENTRY_WIDTH = 77  // Entry width including flow ID, head pointer, tail pointer, and depth flag
-) (
+  ) (
     input               clk,                    // Clock
     input               reset,                  // Asynchronous reset
     input               init_req,               // Initialization request
