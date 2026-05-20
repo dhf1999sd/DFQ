@@ -13,8 +13,9 @@
 `timescale 1ns / 1ps
 
 module FMT #(
-    parameter           NUM_ENTRY   = 16,
-    parameter           ENTRY_WIDTH = 77
+    parameter           NUM_ENTRY        = 100,
+    parameter           ENTRY_WIDTH      = 77,
+    parameter           ENTRY_ADDR_WIDTH = 7
   )(
     input               clk,
     input               reset,
@@ -24,7 +25,7 @@ module FMT #(
     output              cam_matched,
     output              cam_mismatched,
     output [19:0]       cam_match_tail,
-    output [3:0]        cam_match_addr,
+    output [ENTRY_ADDR_WIDTH-1:0] cam_match_addr,
     input  [19:0]       cam_refresh_tail,
     input               depth_flag,
     input               cam_wr_search_ack,
@@ -51,14 +52,15 @@ module FMT #(
   /***************reg*******************/
 
   /***************wire******************/
-  wire [3:0]                         cam_read_addr;
+  wire [ENTRY_ADDR_WIDTH-1:0]        cam_read_addr;
   wire [NUM_ENTRY*ENTRY_WIDTH-1:0]   cam_snapshot;
 
   /***************component*************/
   FMT_table_manager #(
                       .NUM_ENTRY(NUM_ENTRY),
-                      .ENTRY_WIDTH(ENTRY_WIDTH)
-                    ) u_table_manager (
+                      .ENTRY_WIDTH(ENTRY_WIDTH),
+                      .ENTRY_ADDR_WIDTH(ENTRY_ADDR_WIDTH)
+                    ) u_FMT_table_manager(
                       .clk                  (clk),
                       .reset                (reset),
                       .init_req             (init_req),
@@ -84,7 +86,8 @@ module FMT #(
 
   FMT_dequeue_scheduler #(
                           .NUM_ENTRY(NUM_ENTRY),
-                          .ENTRY_WIDTH(ENTRY_WIDTH)
+                          .ENTRY_WIDTH(ENTRY_WIDTH),
+                          .ENTRY_ADDR_WIDTH(ENTRY_ADDR_WIDTH)
                         ) u_dequeue_scheduler (
                           .clk                  (clk),
                           .reset                (reset),
@@ -115,8 +118,9 @@ endmodule
 //////////////////////////////////////////////////////////////////////////////////
 
 module FMT_table_manager #(
-    parameter           NUM_ENTRY   = 16,
-    parameter           ENTRY_WIDTH = 77
+    parameter           NUM_ENTRY        = 200,
+    parameter           ENTRY_WIDTH      = 77,
+    parameter           ENTRY_ADDR_WIDTH = 7
   )(
     input                           clk,
     input                           reset,
@@ -126,7 +130,7 @@ module FMT_table_manager #(
     output reg                      cam_matched,
     output reg                      cam_mismatched,
     output reg [19:0]               cam_match_tail,
-    output reg [3:0]                cam_match_addr,
+    output reg [ENTRY_ADDR_WIDTH-1:0] cam_match_addr,
     input      [19:0]               cam_refresh_tail,
     input                           depth_flag,
     input                           cam_wr_search_ack,
@@ -135,7 +139,7 @@ module FMT_table_manager #(
     input                           cam_wr_tail_req,
     input      [19:0]               cam_wr_tail,
     input      [31:0]               flow_ID,
-    input      [3:0]                cam_read_addr,
+    input      [ENTRY_ADDR_WIDTH-1:0] cam_read_addr,
     input      [19:0]               cam_refresh_head,
     input                           cam_refresh_head_flag,
     output     [NUM_ENTRY*ENTRY_WIDTH-1:0] cam_snapshot
@@ -150,18 +154,27 @@ module FMT_table_manager #(
   /***************mechine***************/
 
   /***************reg*******************/
-  reg  [3:0]              free_addr_fifo_din;
+  reg  [ENTRY_ADDR_WIDTH-1:0] free_addr_fifo_din;
   reg                     free_addr_fifo_wr;
   reg                     free_addr_fifo_rd;
   reg  [ENTRY_WIDTH-1:0]  cam_entry [0:NUM_ENTRY-1];
   reg  [3:0]              fsm_state;
   reg  [5:0]              aging_idx;
-  reg  [3:0]              match_entry_idx;
+  reg  [ENTRY_ADDR_WIDTH-1:0] match_entry_idx;
   reg                     match_entry_found;
   reg                     cam_matched_d;
   reg                     cam_mismatched_d;
   reg  [19:0]             cam_match_tail_d;
-  reg  [3:0]              cam_match_addr_d;
+  reg  [ENTRY_ADDR_WIDTH-1:0] cam_match_addr_d;
+  reg  [ENTRY_ADDR_WIDTH-1:0] matched_entry_addr;
+  reg  [ENTRY_ADDR_WIDTH-1:0] allocated_entry_addr;
+  reg  [ENTRY_ADDR_WIDTH-1:0] cam_wr_head_addr_q;
+  reg  [31:0]             cam_wr_head_flow_id_q;
+  reg  [19:0]             cam_wr_head_value_q;
+  reg  [ENTRY_ADDR_WIDTH-1:0] free_addr_fifo_mem [0:NUM_ENTRY-1];
+  reg  [ENTRY_ADDR_WIDTH-1:0] free_addr_fifo_wr_ptr;
+  reg  [ENTRY_ADDR_WIDTH-1:0] free_addr_fifo_rd_ptr;
+  reg  [ENTRY_ADDR_WIDTH:0]   free_addr_fifo_count;
 
   integer                 init_idx;
   integer                 search_idx;
@@ -169,7 +182,7 @@ module FMT_table_manager #(
   integer                 scan_idx;
 
   /***************wire******************/
-  wire [3:0]              free_addr_fifo_dout;
+  wire [ENTRY_ADDR_WIDTH-1:0] free_addr_fifo_dout;
   wire                    free_addr_fifo_empty;
   wire                    free_addr_fifo_full;
 
@@ -182,17 +195,9 @@ module FMT_table_manager #(
     end
   endgenerate
 
-  FMT_fifo_ft u_fifo_ft_w4_d16 (
-                .clk       (clk),
-                .rst       (reset),
-                .din       (free_addr_fifo_din),
-                .wr_en     (free_addr_fifo_wr),
-                .rd_en     (free_addr_fifo_rd),
-                .dout      (free_addr_fifo_dout),
-                .full      (free_addr_fifo_full),
-                .empty     (free_addr_fifo_empty),
-                .data_count()
-              );
+  assign free_addr_fifo_dout  = free_addr_fifo_mem[free_addr_fifo_rd_ptr];
+  assign free_addr_fifo_empty = (free_addr_fifo_count == 0);
+  assign free_addr_fifo_full  = (free_addr_fifo_count == NUM_ENTRY);
 
   /***************assign****************/
 
@@ -211,9 +216,36 @@ module FMT_table_manager #(
       temp_idx          <= 0;
       match_entry_idx   <= 0;
       match_entry_found <= 0;
+      allocated_entry_addr <= 0;
+      cam_wr_head_addr_q    <= 0;
+      cam_wr_head_flow_id_q <= 0;
+      cam_wr_head_value_q   <= 0;
+      free_addr_fifo_wr_ptr <= 0;
+      free_addr_fifo_rd_ptr <= 0;
+      free_addr_fifo_count  <= 0;
     end
     else
     begin
+      if (free_addr_fifo_wr && !free_addr_fifo_full)
+      begin
+        free_addr_fifo_mem[free_addr_fifo_wr_ptr] <= free_addr_fifo_din;
+        free_addr_fifo_wr_ptr <= (free_addr_fifo_wr_ptr == NUM_ENTRY - 1) ? 0 : free_addr_fifo_wr_ptr + 1'b1;
+      end
+
+      if (free_addr_fifo_rd && !free_addr_fifo_empty)
+      begin
+        free_addr_fifo_rd_ptr <= (free_addr_fifo_rd_ptr == NUM_ENTRY - 1) ? 0 : free_addr_fifo_rd_ptr + 1'b1;
+      end
+
+      case ({free_addr_fifo_wr && !free_addr_fifo_full, free_addr_fifo_rd && !free_addr_fifo_empty})
+        2'b10:
+          free_addr_fifo_count <= free_addr_fifo_count + 1'b1;
+        2'b01:
+          free_addr_fifo_count <= free_addr_fifo_count - 1'b1;
+        default:
+          free_addr_fifo_count <= free_addr_fifo_count;
+      endcase
+
       case (fsm_state)
         0:
         begin
@@ -229,57 +261,25 @@ module FMT_table_manager #(
           begin
             if (!free_addr_fifo_empty)
             begin
-              cam_entry[free_addr_fifo_dout][71:40] <= flow_ID;
-              cam_entry[free_addr_fifo_dout][39:20] <= cam_wr_head;
-              cam_entry[free_addr_fifo_dout][19:0]  <= cam_wr_head;
-              cam_entry[free_addr_fifo_dout][75:72] <= 4'd0;
-              cam_entry[free_addr_fifo_dout][76]    <= 1'b1;
-              free_addr_fifo_rd                     <= 1'b1;
-              fsm_state                              <= 1;
+              cam_wr_head_addr_q    <= free_addr_fifo_dout;
+              cam_wr_head_flow_id_q <= flow_ID;
+              cam_wr_head_value_q   <= cam_wr_head;
+              free_addr_fifo_rd     <= 1'b1;
+              fsm_state             <= 13;
             end
           end
           else if (cam_wr_tail_req)
           begin
-            match_entry_idx   = 4'd0;
-            match_entry_found = 1'b0;
-
-            for (scan_idx = 0; scan_idx < NUM_ENTRY; scan_idx = scan_idx + 1)
-            begin
-              if (!match_entry_found && (flow_ID == cam_entry[scan_idx][71:40]) && (cam_entry[scan_idx][76] == 1'b1))
-              begin
-                match_entry_found = 1'b1;
-                match_entry_idx   = scan_idx[3:0];
-              end
-            end
-
-            if (match_entry_found)
-            begin
-              cam_entry[match_entry_idx][19:0]  <= cam_wr_tail;
-              cam_entry[match_entry_idx][75:72] <= depth_flag ? cam_entry[match_entry_idx][75:72] + 1'b1 : cam_entry[match_entry_idx][75:72];
-              cam_entry[match_entry_idx][76]    <= 1'b1;
-            end
+            cam_entry[allocated_entry_addr][19:0]  <= cam_wr_tail;
+            cam_entry[allocated_entry_addr][75:72] <= depth_flag ? cam_entry[allocated_entry_addr][75:72] + 1'b1 : cam_entry[allocated_entry_addr][75:72];
+            cam_entry[allocated_entry_addr][76]    <= 1'b1;
             fsm_state <= 1;
           end
           else if (cam_wr_search_ack)
           begin
-            match_entry_idx   = 4'd0;
-            match_entry_found = 1'b0;
-
-            for (scan_idx = 0; scan_idx < NUM_ENTRY; scan_idx = scan_idx + 1)
-            begin
-              if (!match_entry_found && (flow_ID == cam_entry[scan_idx][71:40]) && (cam_entry[scan_idx][76] == 1'b1))
-              begin
-                match_entry_found = 1'b1;
-                match_entry_idx   = scan_idx[3:0];
-              end
-            end
-
-            if (match_entry_found)
-            begin
-              cam_entry[match_entry_idx][19:0]  <= cam_refresh_tail;
-              cam_entry[match_entry_idx][75:72] <= depth_flag ? cam_entry[match_entry_idx][75:72] + 1'b1 : cam_entry[match_entry_idx][75:72];
-              cam_entry[match_entry_idx][76]    <= 1'b1;
-            end
+            cam_entry[matched_entry_addr][19:0]  <= cam_refresh_tail;
+            cam_entry[matched_entry_addr][75:72] <= depth_flag ? cam_entry[matched_entry_addr][75:72] + 1'b1 : cam_entry[matched_entry_addr][75:72];
+            cam_entry[matched_entry_addr][76]    <= 1'b1;
           end
           else if (cam_refresh_head_flag)
           begin
@@ -304,7 +304,7 @@ module FMT_table_manager #(
 
         2:
         begin
-          free_addr_fifo_din <= init_idx[3:0];
+          free_addr_fifo_din <= init_idx;
           free_addr_fifo_wr  <= 1'b1;
           cam_entry[init_idx] <= {ENTRY_WIDTH{1'b0}};
 
@@ -343,6 +343,19 @@ module FMT_table_manager #(
         12:
           fsm_state <= 2;
 
+        13:
+        begin
+          free_addr_fifo_wr                       <= 0;
+          free_addr_fifo_rd                       <= 0;
+          cam_entry[cam_wr_head_addr_q][71:40]   <= cam_wr_head_flow_id_q;
+          cam_entry[cam_wr_head_addr_q][39:20]   <= cam_wr_head_value_q;
+          cam_entry[cam_wr_head_addr_q][19:0]    <= cam_wr_head_value_q;
+          cam_entry[cam_wr_head_addr_q][75:72]   <= 4'd0;
+          cam_entry[cam_wr_head_addr_q][76]      <= 1'b1;
+          allocated_entry_addr                    <= cam_wr_head_addr_q;
+          fsm_state                               <= 1;
+        end
+
         default:
           fsm_state <= 0;
       endcase
@@ -362,6 +375,7 @@ module FMT_table_manager #(
       cam_mismatched_d   <= 0;
       cam_match_tail_d   <= 0;
       cam_match_addr_d   <= 0;
+      matched_entry_addr <= 0;
     end
     else
     begin
@@ -381,7 +395,8 @@ module FMT_table_manager #(
             cam_matched_d    <= 1'b1;
             cam_mismatched_d <= 1'b0;
             cam_match_tail_d <= cam_entry[search_idx][19:0];
-            cam_match_addr_d <= search_idx[3:0];
+            cam_match_addr_d <= search_idx;
+            matched_entry_addr <= search_idx;
           end
         end
       end
@@ -408,8 +423,9 @@ endmodule
 //////////////////////////////////////////////////////////////////////////////////
 
 module FMT_dequeue_scheduler #(
-    parameter           NUM_ENTRY   = 16,
-    parameter           ENTRY_WIDTH = 77
+    parameter           NUM_ENTRY        = 100,
+    parameter           ENTRY_WIDTH      = 77,
+    parameter           ENTRY_ADDR_WIDTH = 7
   )(
     input                         clk,
     input                         reset,
@@ -417,7 +433,7 @@ module FMT_dequeue_scheduler #(
     input                         cam_refresh_head_flag,
     output reg                    ptr_read,
     output reg [19:0]             cam_read_head,
-    output reg [3:0]              cam_read_addr,
+    output reg [ENTRY_ADDR_WIDTH-1:0] cam_read_addr,
     output reg                    read_mode_flag
   );
 
@@ -460,12 +476,12 @@ module FMT_dequeue_scheduler #(
     begin
       for (scan_idx = 0; scan_idx < NUM_ENTRY; scan_idx = scan_idx + 1)
       begin
-        if ((cam_snapshot_entry[scan_idx][75:72] > 4'd1) && !ptr_read)
+        if ((cam_snapshot_entry[scan_idx][75:72] > 4'd0) && !ptr_read)
         begin
           ptr_read       <= 1'b1;
           cam_read_head  <= cam_snapshot_entry[scan_idx][39:20];
           read_mode_flag <= cam_snapshot_entry[scan_idx][76];
-          cam_read_addr  <= scan_idx[3:0];
+          cam_read_addr  <= scan_idx;
         end
         else if (cam_refresh_head_flag)
         begin
