@@ -1,228 +1,148 @@
 //////////////////////////////////////////////////////////////////////////////////
-// Company:         LZU
-// Engineer:        WenxuWu
-// Create Date:     2026/05/15
+// Company:
+// Engineer:
+// Create Date:     2024/05/15 16:43:21
 // Module Name:     dequeue_process
-// Project Name:    DFQ_CAM_v6
-// Target Devices:  ZYNQ-7000
-// Tool Versions:   VIVADO2023.2
-// Description:     Dequeue process module for DFQ CAM system with FSM control
-//                  Handles reading from pointer RAM and managing queue operations
+// Project Name:
+// Target Devices:
+// Tool Versions:
+// Description:
 //////////////////////////////////////////////////////////////////////////////////
 
 `timescale 1ns / 1ps
 
-module dequeue_process #(
-    parameter           DATA_WIDTH = 20,
-    parameter           ADDR_WIDTH = 10
-)(
-    // Clock and Reset
-    input               clk,
-    input               reset,
-
-    // Control Signals
-    input               ptr_read,
-    input               write_flag,
-    input               read_mode_flag,
-    output reg          read_flag,
-
-    // CAM Interface
-    input  [DATA_WIDTH-1:0]   cam_read_head,
-    output reg [DATA_WIDTH-1:0] cam_refresh_head,
-    output reg                 cam_refresh_head_flag,
-
-    // Pointer RAM Interface
-    input  [DATA_WIDTH-1:0]   ptr_ram_dout,
-    output reg [ADDR_WIDTH-1:0] ptr_ram_rd_addr,
-
-    // PCP Queue Interface
-    output reg [DATA_WIDTH-1:0] pcp_queue_din,
-    output reg                 pcp_queue_wr
+module dequeue_process(
+    input               i_clk              ,
+    input               i_rst              ,
+    output reg          o_read_busy        ,
+    input               i_dequeue_req      ,
+    input               i_write_busy       ,
+    input      [19:0]   i_flow_head        ,
+    output reg [19:0]   o_prio_queue_din   ,
+    input      [19:0]   i_ptr_ram_dout     ,
+    output reg          o_prio_queue_wr    ,
+    output reg [9:0]    o_ptr_ram_rd_addr  ,
+    output reg [19:0]   o_refresh_head     ,
+    output reg          o_refresh_head_vld
 );
 
 /***************function**************/
-
 /***************parameter*************/
-
-// State Machine Definition
-localparam [3:0] ST_IDLE         = 4'd0;
-localparam [3:0] ST_START        = 4'd1;
-localparam [3:0] ST_CHECK        = 4'd2;
-localparam [3:0] ST_READ         = 4'd3;
-localparam [3:0] ST_PUSH         = 4'd4;
-localparam [3:0] ST_PUSH_LOOP    = 4'd5;
-localparam [3:0] ST_PUSH_DONE    = 4'd6;
-localparam [3:0] ST_REFRESH      = 4'd7;
-localparam [3:0] ST_REFRESH_DONE = 4'd8;
-localparam [3:0] ST_EXIT         = 4'd9;
-localparam [3:0] ST_CAM_REFRESH  = 4'd10;
-localparam [3:0] ST_CAM_WAIT     = 4'd11;
-localparam [3:0] ST_FINAL        = 4'd12;
-localparam [3:0] ST_EXIT2        = 4'd13;
-localparam [3:0] ST_NEXT         = 4'd14;
-localparam [3:0] ST_WAIT         = 4'd15;
+  localparam S_IDLE         = 4'd0 ;
+  localparam S_START        = 4'd1 ;
+  localparam S_CHECK        = 4'd2 ;
+  localparam S_NEXT         = 4'd3 ;
+  localparam S_PUSH         = 4'd4 ;
+  localparam S_WAIT         = 4'd5 ;
+  localparam S_PUSH_LOOP    = 4'd6 ;
+  localparam S_PUSH_DONE    = 4'd7 ;
+  localparam S_REFRESH      = 4'd8 ;
+  localparam S_REFRESH_DONE = 4'd9 ;
+  localparam S_EXIT         = 4'd10;
+  localparam S_READ         = 4'd11;
+  localparam S_EXIT2        = 4'd12;
 
 /***************port******************/
-
 /***************mechine***************/
-
 /***************reg*******************/
-reg [3:0]           state_q;
-reg [DATA_WIDTH-1:0] rd_head_q;
-reg                 pushed_tail_q;
+  reg [3:0]  r_dequeue_state;
+  reg [19:0] r_curr_cell;
 
 /***************wire******************/
-wire                is_tail_entry;
-wire                is_ptr_tail;
-
 /***************component*************/
-
 /***************assign****************/
-assign is_tail_entry = cam_read_head[15] && cam_read_head[14];
-assign is_ptr_tail   = ptr_ram_dout[15];
-
 /***************always****************/
-always @(posedge clk or posedge reset)
-begin
-    if(reset)
+  always @(posedge i_clk)
+    if (i_rst)
     begin
-        state_q               <= ST_IDLE;
-        read_flag             <= 1'b0;
-        pcp_queue_wr          <= 1'b0;
-        ptr_ram_rd_addr       <= {ADDR_WIDTH{1'b0}};
-        pcp_queue_din         <= {DATA_WIDTH{1'b0}};
-        cam_refresh_head_flag <= 1'b0;
-        cam_refresh_head      <= {DATA_WIDTH{1'b0}};
-        rd_head_q             <= {DATA_WIDTH{1'b0}};
-        pushed_tail_q         <= 1'b0;
+      r_dequeue_state   <= S_IDLE;
+      o_prio_queue_wr   <= 1'b0;
+      o_ptr_ram_rd_addr <= 10'd0;
+      o_prio_queue_din  <= 20'd0;
+      o_refresh_head_vld <= 1'b0;
+      o_refresh_head    <= 20'd0;
+      o_read_busy       <= 1'b0;
+      r_curr_cell       <= 20'd0;
     end
     else
     begin
-        // Default values
-        pcp_queue_wr          <= 1'b0;
-        cam_refresh_head_flag <= 1'b0;
-
-        case(state_q)
-            ST_IDLE:
-            begin
-                if(ptr_read && !write_flag)
-                begin
-                    state_q <= ST_START;
-                    read_flag <= 1'b1;
-                end
-            end
-
-            ST_START:
-            begin
-                pcp_queue_din     <= cam_read_head;
-                pcp_queue_wr      <= 1'b1;
-                ptr_ram_rd_addr   <= cam_read_head[ADDR_WIDTH-1:0];
-                state_q     <= ST_CHECK;
-            end
-
-            ST_CHECK:
-            begin
-                if(is_tail_entry)
-                    state_q <= ST_EXIT2;
-                else
-                    state_q <= ST_READ;
-            end
-
-            ST_READ:
-            begin
-                state_q <= ST_PUSH;
-            end
-
-            ST_PUSH:
-            begin
-                pcp_queue_din     <= ptr_ram_dout;
-                pcp_queue_wr      <= 1'b1;
-                ptr_ram_rd_addr   <= ptr_ram_dout[ADDR_WIDTH-1:0];
-                rd_head_q         <= ptr_ram_dout;
-                pushed_tail_q     <= is_ptr_tail;
-                state_q     <= ST_PUSH_LOOP;
-            end
-
-            ST_PUSH_LOOP:
-            begin
-                state_q <= ST_PUSH_DONE;
-            end
-
-            ST_PUSH_DONE:
-            begin
-                state_q <= ST_REFRESH;
-            end
-
-            ST_REFRESH:
-            begin
-                state_q <= ST_REFRESH_DONE;
-            end
-
-            ST_REFRESH_DONE:
-            begin
-                if(pushed_tail_q)
-                begin
-                    state_q     <= ST_EXIT;
-                end
-                else
-                begin
-                    state_q <= ST_PUSH;
-                end
-            end
-
-            ST_EXIT:
-            begin
-                cam_refresh_head_flag <= 1'b0;
-                state_q <= ST_CAM_REFRESH;
-            end
-
-            ST_CAM_REFRESH:
-            begin
-                state_q <= ST_CAM_WAIT;
-            end
-
-            ST_CAM_WAIT:
-            begin
-                cam_refresh_head      <= ptr_ram_dout;
-                cam_refresh_head_flag <= 1'b1;
-                state_q         <= ST_FINAL;
-            end
-
-            ST_FINAL:
-            begin
-                read_flag     <= 1'b0;
-                state_q <= ST_IDLE;
-            end
-
-            ST_EXIT2:
-            begin
-                state_q <= ST_NEXT;
-            end
-
-            ST_NEXT:
-            begin
-                cam_refresh_head      <= ptr_ram_dout;
-                cam_refresh_head_flag <= 1'b1;
-                state_q         <= ST_WAIT;
-            end
-
-            ST_WAIT:
-            begin
-                cam_refresh_head_flag <= 1'b0;
-                cam_refresh_head      <= {DATA_WIDTH{1'b0}};
-                read_flag             <= 1'b0;
-                state_q         <= ST_IDLE;
-            end
-
-            default:
-            begin
-                read_flag             <= 1'b0;
-                pcp_queue_wr          <= 1'b0;
-                cam_refresh_head_flag <= 1'b0;
-                state_q         <= ST_IDLE;
-            end
-        endcase
+      o_prio_queue_wr <= 1'b0;
+      case (r_dequeue_state)
+        S_IDLE:
+        begin
+          if (i_dequeue_req & !i_write_busy)
+          begin
+            r_dequeue_state <= S_START;
+            o_read_busy     <= 1'b1;
+          end
+        end
+        S_START:
+        begin
+          // Output the current head first; it is the first cell of the packet.
+          r_curr_cell       <= i_flow_head[19:0];
+          o_prio_queue_din  <= i_flow_head[19:0];
+          o_prio_queue_wr   <= 1'b1;
+          o_ptr_ram_rd_addr <= i_flow_head[9:0];
+          r_dequeue_state   <= S_CHECK;
+        end
+        S_CHECK:
+        begin
+          if ((r_curr_cell[15] && r_curr_cell[14]))
+            r_dequeue_state <= S_EXIT2;
+          else
+            r_dequeue_state <= S_READ;
+        end
+        S_NEXT:
+        begin
+          r_dequeue_state   <= S_WAIT;
+          o_refresh_head    <= i_ptr_ram_dout[19:0];
+          o_refresh_head_vld <= 1'b1;
+        end
+        S_PUSH:
+        begin
+          r_dequeue_state   <= S_PUSH_LOOP;
+          r_curr_cell       <= i_ptr_ram_dout[19:0];
+          o_prio_queue_din  <= i_ptr_ram_dout[19:0];
+          o_prio_queue_wr   <= 1'b1;
+          o_ptr_ram_rd_addr <= i_ptr_ram_dout[9:0];
+        end
+        S_WAIT:
+        begin
+          r_dequeue_state    <= S_IDLE;
+          o_read_busy        <= 1'b0;
+          o_refresh_head_vld <= 1'b0;
+          o_refresh_head     <= 20'd0;
+        end
+        S_PUSH_LOOP:
+          r_dequeue_state <= S_PUSH_DONE;
+        S_PUSH_DONE:
+          r_dequeue_state <= S_REFRESH;
+        S_REFRESH:
+          r_dequeue_state <= S_REFRESH_DONE;
+        S_REFRESH_DONE:
+        begin
+          if (r_curr_cell[15])
+          begin
+            o_refresh_head     <= i_ptr_ram_dout[19:0];
+            o_refresh_head_vld <= 1'b1;
+            r_dequeue_state    <= S_EXIT;
+          end
+          else
+            r_dequeue_state <= S_PUSH;
+        end
+        S_EXIT:
+        begin
+          r_dequeue_state    <= S_IDLE;
+          o_read_busy        <= 1'b0;
+          o_refresh_head_vld <= 1'b0;
+          o_refresh_head     <= 20'd0;
+        end
+        S_READ:
+          r_dequeue_state <= S_PUSH;
+        S_EXIT2:
+          r_dequeue_state <= S_NEXT;
+        default:
+          r_dequeue_state <= S_IDLE;
+      endcase
     end
-end
-
 endmodule
