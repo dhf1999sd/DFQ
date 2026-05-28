@@ -52,6 +52,7 @@ module FMT #(
 
   /***************parameter*************/
   localparam integer ENTRY_DEPTH_W = 4;
+  localparam integer SEARCH_MID    = (NUM_ENTRY + 1) / 2;
 
   /***************port******************/
   /***************mechine***************/
@@ -66,9 +67,12 @@ module FMT #(
   reg      [ENTRY_ADDR_W-1:0]     r_free_entry_rd_ptr;
   reg      [ENTRY_ADDR_W-1:0]     r_free_entry_wr_ptr;
   reg      [ENTRY_ADDR_W:0]       r_free_entry_count;
+  reg      [ENTRY_ADDR_W-1:0]     r_free_entry_front_addr;
   reg      [ENTRY_ADDR_W-1:0]     r_pending_alloc_addr;
   reg                             r_pending_alloc_vld;
   reg      [ENTRY_ADDR_W-1:0]     r_read_entry_addr;
+  reg                             r_search_req_dly;
+  reg      [31:0]                 r_search_flow_id_dly;
   reg                             r_search_hit_dly;
   reg                             r_search_miss_dly;
   reg      [19:0]                 r_match_tail_dly;
@@ -81,6 +85,12 @@ module FMT #(
   reg                             w_search_hit;
   reg      [ENTRY_ADDR_W-1:0]     w_search_addr;
   reg      [19:0]                 w_search_tail;
+  reg                             w_search_hit_low;
+  reg      [ENTRY_ADDR_W-1:0]     w_search_addr_low;
+  reg      [19:0]                 w_search_tail_low;
+  reg                             w_search_hit_high;
+  reg      [ENTRY_ADDR_W-1:0]     w_search_addr_high;
+  reg      [19:0]                 w_search_tail_high;
   reg                             w_read_select_vld;
   reg      [ENTRY_ADDR_W-1:0]     w_read_select_addr;
   reg      [19:0]                 w_read_select_head;
@@ -90,18 +100,44 @@ module FMT #(
   /***************always****************/
   always @(*)
   begin
-    w_search_hit  = 1'b0;
-    w_search_addr = {ENTRY_ADDR_W{1'b0}};
-    w_search_tail = 20'd0;
+    w_search_hit_low  = 1'b0;
+    w_search_addr_low = {ENTRY_ADDR_W{1'b0}};
+    w_search_tail_low = 20'd0;
+    w_search_hit_high  = 1'b0;
+    w_search_addr_high = {ENTRY_ADDR_W{1'b0}};
+    w_search_tail_high = 20'd0;
 
-    for (j = 0; j < NUM_ENTRY; j = j + 1)
+    for (j = 0; j < SEARCH_MID; j = j + 1)
     begin
-      if ((i_flow_id == r_entry_flow_id[j]) && (r_entry_depth[j] != {ENTRY_DEPTH_W{1'b0}}))
+      if ((r_search_flow_id_dly == r_entry_flow_id[j]) && (r_entry_depth[j] != {ENTRY_DEPTH_W{1'b0}}))
       begin
-        w_search_hit  = 1'b1;
-        w_search_addr = j[ENTRY_ADDR_W-1:0];
-        w_search_tail = r_entry_tail[j];
+        w_search_hit_low  = 1'b1;
+        w_search_addr_low = j[ENTRY_ADDR_W-1:0];
+        w_search_tail_low = r_entry_tail[j];
       end
+    end
+
+    for (j = SEARCH_MID; j < NUM_ENTRY; j = j + 1)
+    begin
+      if ((r_search_flow_id_dly == r_entry_flow_id[j]) && (r_entry_depth[j] != {ENTRY_DEPTH_W{1'b0}}))
+      begin
+        w_search_hit_high  = 1'b1;
+        w_search_addr_high = j[ENTRY_ADDR_W-1:0];
+        w_search_tail_high = r_entry_tail[j];
+      end
+    end
+
+    if (w_search_hit_high)
+    begin
+      w_search_hit  = 1'b1;
+      w_search_addr = w_search_addr_high;
+      w_search_tail = w_search_tail_high;
+    end
+    else
+    begin
+      w_search_hit  = w_search_hit_low;
+      w_search_addr = w_search_addr_low;
+      w_search_tail = w_search_tail_low;
     end
   end
 
@@ -133,6 +169,7 @@ module FMT #(
       r_free_entry_rd_ptr         <= {ENTRY_ADDR_W{1'b0}};
       r_free_entry_wr_ptr         <= {ENTRY_ADDR_W{1'b0}};
       r_free_entry_count          <= NUM_ENTRY[ENTRY_ADDR_W:0];
+      r_free_entry_front_addr     <= {ENTRY_ADDR_W{1'b0}};
       for (i = 0; i < NUM_ENTRY; i = i + 1)
       begin
         r_entry_valid[i]   <= 1'b0;
@@ -156,6 +193,7 @@ module FMT #(
         r_free_entry_rd_ptr         <= {ENTRY_ADDR_W{1'b0}};
         r_free_entry_wr_ptr         <= {ENTRY_ADDR_W{1'b0}};
         r_free_entry_count          <= NUM_ENTRY[ENTRY_ADDR_W:0];
+        r_free_entry_front_addr     <= {ENTRY_ADDR_W{1'b0}};
         for (i = 0; i < NUM_ENTRY; i = i + 1)
         begin
           r_entry_valid[i]   <= 1'b0;
@@ -170,11 +208,11 @@ module FMT #(
       begin
         if ((r_free_entry_count != 0) && !r_pending_alloc_vld)
         begin
-          r_pending_alloc_addr                  <= r_free_entry_fifo[r_free_entry_rd_ptr];
+          r_pending_alloc_addr                  <= r_free_entry_front_addr;
           r_pending_alloc_vld                 <= 1'b1;
-          r_entry_valid[r_free_entry_fifo[r_free_entry_rd_ptr]]   <= 1'b1;
-          r_entry_flow_id[r_free_entry_fifo[r_free_entry_rd_ptr]] <= i_flow_id;
-          r_entry_head[r_free_entry_fifo[r_free_entry_rd_ptr]]    <= i_alloc_head_data;
+          r_entry_valid[r_free_entry_front_addr]   <= 1'b1;
+          r_entry_flow_id[r_free_entry_front_addr] <= i_flow_id;
+          r_entry_head[r_free_entry_front_addr]    <= i_alloc_head_data;
         end
       end
       else if (i_alloc_tail_req)
@@ -186,6 +224,8 @@ module FMT #(
             r_entry_depth[r_pending_alloc_addr] <= r_entry_depth[r_pending_alloc_addr] + 1'b1;
           r_free_entry_rd_ptr         <= next_ptr(r_free_entry_rd_ptr);
           r_free_entry_count          <= r_free_entry_count - 1'b1;
+          if (r_free_entry_count > 1)
+            r_free_entry_front_addr <= r_free_entry_fifo[next_ptr(r_free_entry_rd_ptr)];
           r_pending_alloc_vld <= 1'b0;
         end
       end
@@ -203,6 +243,8 @@ module FMT #(
         begin
           r_free_entry_fifo[r_free_entry_wr_ptr]         <= r_read_entry_addr;
           r_free_entry_wr_ptr                    <= next_ptr(r_free_entry_wr_ptr);
+          if (r_free_entry_count == 0)
+            r_free_entry_front_addr             <= r_read_entry_addr;
           r_entry_valid[r_read_entry_addr]     <= 1'b0;
           r_entry_flow_id[r_read_entry_addr]   <= 32'd0;
           r_entry_head[r_read_entry_addr]      <= 20'd0;
@@ -218,6 +260,8 @@ module FMT #(
   begin
     if (i_rst)
     begin
+      r_search_req_dly    <= 1'b0;
+      r_search_flow_id_dly <= 32'd0;
       o_search_hit        <= 1'b0;
       o_search_miss     <= 1'b0;
       o_match_tail     <= 20'd0;
@@ -229,12 +273,15 @@ module FMT #(
     end
     else
     begin
+      r_search_req_dly     <= i_search_req;
+      if (i_search_req)
+        r_search_flow_id_dly <= i_flow_id;
       o_search_hit    <= r_search_hit_dly;
       o_search_miss <= r_search_miss_dly;
       o_match_tail <= r_match_tail_dly;
       o_match_addr <= r_match_addr_dly;
 
-      if (i_search_req)
+      if (r_search_req_dly)
       begin
         r_search_hit_dly    <= w_search_hit;
         r_search_miss_dly <= ~w_search_hit;
