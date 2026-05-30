@@ -1,467 +1,851 @@
 //////////////////////////////////////////////////////////////////////////////////
-// Company:         LZU
-// Engineer:        WenxuWu
+// Company:
+// Engineer:
+// Create Date:     2024/05/07 22:05:26
 // Module Name:     FMT
-// Description:     Hash-bucket flow table implemented with inferred block RAM.
+// Project Name:
+// Target Devices:
+// Tool Versions:
+// Description:     Flow mapping table with RAM-backed bucket and entry storage
 //////////////////////////////////////////////////////////////////////////////////
 
 `timescale 1ns / 1ps
 
 module FMT #(
-    parameter integer NUM_ENTRY   = 200,
-    parameter integer ENTRY_WIDTH = 77,
-    parameter integer NUM_BUCKET  = 4,
-    parameter integer ADDR_WIDTH  = ((NUM_ENTRY + NUM_BUCKET - 1) <= 1) ? 1 : $clog2(NUM_ENTRY + NUM_BUCKET - 1)
+    parameter integer NUM_ENTRY    = 100,
+    parameter integer READ_DEPTH_THRESHOLD = 4,
+    parameter integer ENTRY_ADDR_W = (NUM_ENTRY <= 1) ? 1 : $clog2(NUM_ENTRY)
   )(
-    input               clk,
-    input               reset,
-    input               init_req,
-    output              init_ack,
-    input               hash_wr_search,
-    output              hash_search_busy,
-    output              hash_matched,
-    output              hash_mismatched,
-    output [19:0]       hash_match_tail,
-    output [ADDR_WIDTH-1:0] hash_match_addr,
-    input  [19:0]       hash_refresh_tail,
-    input               depth_flag,
-    input               hash_wr_search_ack,
-    input               hash_wr_head_req,
-    input  [19:0]       hash_wr_head,
-    input               hash_wr_tail_req,
-    input  [19:0]       hash_wr_tail,
-    input  [31:0]       flow_ID,
-    output              ptr_read,
-    output [19:0]       hash_read_head,
-    output              read_mode_flag,
-    input  [19:0]       hash_refresh_head,
-    input               hash_refresh_head_flag
+    input                               i_clk,
+    input                               i_rst,
+    input                               i_init_req,
+    output reg                          o_init_ack,
+    input                               i_search_req,
+    output reg                          o_search_hit,
+    output reg                          o_search_miss,
+    output reg  [19:0]                  o_match_tail,
+    output reg  [ENTRY_ADDR_W-1:0]      o_match_addr,
+    input       [19:0]                  i_refresh_tail,
+    input                               i_pkt_done,
+    input                               i_tail_update_req,
+    input                               i_alloc_head_req,
+    input       [19:0]                  i_alloc_head_data,
+    input                               i_alloc_tail_req,
+    input       [19:0]                  i_alloc_tail_data,
+    input       [31:0]                  i_flow_id,
+    output reg                          o_dequeue_req,
+    output reg  [19:0]                  o_flow_head,
+    input       [19:0]                  i_refresh_head,
+    input                               i_refresh_head_vld
   );
 
-  FMT_table_manager #(
-    .NUM_ENTRY(NUM_ENTRY),
-    .ENTRY_WIDTH(ENTRY_WIDTH),
-    .NUM_BUCKET(NUM_BUCKET),
-    .ADDR_WIDTH(ADDR_WIDTH)
-  ) u_table_manager (
-    .clk(clk),
-    .reset(reset),
-    .init_req(init_req),
-    .init_ack(init_ack),
-    .hash_wr_search(hash_wr_search),
-    .hash_search_busy(hash_search_busy),
-    .hash_matched(hash_matched),
-    .hash_mismatched(hash_mismatched),
-    .hash_match_tail(hash_match_tail),
-    .hash_match_addr(hash_match_addr),
-    .hash_refresh_tail(hash_refresh_tail),
-    .depth_flag(depth_flag),
-    .hash_wr_search_ack(hash_wr_search_ack),
-    .hash_wr_head_req(hash_wr_head_req),
-    .hash_wr_head(hash_wr_head),
-    .hash_wr_tail_req(hash_wr_tail_req),
-    .hash_wr_tail(hash_wr_tail),
-    .flow_ID(flow_ID),
-    .ptr_read(ptr_read),
-    .hash_read_head(hash_read_head),
-    .read_mode_flag(read_mode_flag),
-    .hash_refresh_head(hash_refresh_head),
-    .hash_refresh_head_flag(hash_refresh_head_flag)
-  );
-
-endmodule
-
-module FMT_table_manager #(
-    parameter integer NUM_ENTRY   = 200,
-    parameter integer ENTRY_WIDTH = 77,
-    parameter integer NUM_BUCKET  = 4,
-    parameter integer ADDR_WIDTH  = ((NUM_ENTRY + NUM_BUCKET - 1) <= 1) ? 1 : $clog2(NUM_ENTRY + NUM_BUCKET - 1)
-  )(
-    input                       clk,
-    input                       reset,
-    input                       init_req,
-    output reg                  init_ack,
-    input                       hash_wr_search,
-    output                      hash_search_busy,
-    output reg                  hash_matched,
-    output reg                  hash_mismatched,
-    output reg [19:0]           hash_match_tail,
-    output reg [ADDR_WIDTH-1:0] hash_match_addr,
-    input      [19:0]           hash_refresh_tail,
-    input                       depth_flag,
-    input                       hash_wr_search_ack,
-    input                       hash_wr_head_req,
-    input      [19:0]           hash_wr_head,
-    input                       hash_wr_tail_req,
-    input      [19:0]           hash_wr_tail,
-    input      [31:0]           flow_ID,
-    output reg                  ptr_read,
-    output reg [19:0]           hash_read_head,
-    output reg                  read_mode_flag,
-    input      [19:0]           hash_refresh_head,
-    input                       hash_refresh_head_flag
-  );
-
-  localparam integer EFFECTIVE_NUM_BUCKET = (NUM_BUCKET <= 1) ? 1 : NUM_BUCKET;
-  localparam integer BUCKET_ID_WIDTH      = (EFFECTIVE_NUM_BUCKET <= 1) ? 1 : $clog2(EFFECTIVE_NUM_BUCKET);
-  localparam integer BUCKET_DEPTH         = (NUM_ENTRY + EFFECTIVE_NUM_BUCKET - 1) / EFFECTIVE_NUM_BUCKET;
-  localparam integer TABLE_SIZE           = BUCKET_DEPTH * EFFECTIVE_NUM_BUCKET;
-  localparam integer TABLE_ADDR_WIDTH     = (TABLE_SIZE <= 1) ? 1 : $clog2(TABLE_SIZE);
-
-  localparam [2:0] SEARCH_IDLE  = 3'd0;
-  localparam [2:0] SEARCH_READ  = 3'd1;
-  localparam [2:0] SEARCH_WAIT  = 3'd2;
-  localparam [2:0] SEARCH_CHECK = 3'd3;
-  localparam [1:0] SCAN_READ    = 2'd0;
-  localparam [1:0] SCAN_WAIT    = 2'd1;
-  localparam [1:0] SCAN_CHECK   = 2'd2;
-
-  function [ENTRY_WIDTH-1:0] make_entry;
-    input valid;
-    input [3:0] depth;
-    input [31:0] flow_id;
-    input [19:0] head_ptr;
-    input [19:0] tail_ptr;
+  /***************function**************/
+  function [ENTRY_ADDR_W-1:0] next_ptr;
+    input [ENTRY_ADDR_W-1:0] ptr;
     begin
-      make_entry = {valid, depth, flow_id, head_ptr, tail_ptr};
-    end
-  endfunction
-
-  function [BUCKET_ID_WIDTH-1:0] flow_hash_bucket;
-    input [31:0] flow_id;
-    reg [1:0] legacy_hash;
-    reg [31:0] folded_hash;
-    begin
-      legacy_hash = flow_id[1:0] ^ flow_id[3:2] ^ flow_id[5:4] ^ flow_id[7:6] ^
-                    flow_id[9:8] ^ flow_id[11:10] ^ flow_id[13:12] ^ flow_id[15:14] ^
-                    flow_id[17:16] ^ flow_id[19:18] ^ flow_id[21:20] ^ flow_id[23:22] ^
-                    flow_id[25:24] ^ flow_id[27:26] ^ flow_id[29:28] ^ flow_id[31:30];
-      folded_hash = flow_id ^ {flow_id[15:0], flow_id[31:16]} ^
-                    {flow_id[7:0], flow_id[31:8]} ^ {flow_id[3:0], flow_id[31:4]};
-      if (EFFECTIVE_NUM_BUCKET <= 1)
-        flow_hash_bucket = {BUCKET_ID_WIDTH{1'b0}};
-      else if (EFFECTIVE_NUM_BUCKET == 4)
-        flow_hash_bucket = legacy_hash;
+      if (ptr == NUM_ENTRY - 1)
+        next_ptr = {ENTRY_ADDR_W{1'b0}};
       else
-        flow_hash_bucket = folded_hash % EFFECTIVE_NUM_BUCKET;
+        next_ptr = ptr + 1'b1;
     end
   endfunction
 
-  function [TABLE_ADDR_WIDTH-1:0] bucket_slot_addr_int;
-    input [BUCKET_ID_WIDTH-1:0] bucket_id;
-    input [TABLE_ADDR_WIDTH-1:0] slot_id;
+  function integer next_pow2;
+    input integer value;
+    integer pow2;
     begin
-      bucket_slot_addr_int = (bucket_id * BUCKET_DEPTH) + slot_id;
+      pow2 = 1;
+      while (pow2 < value)
+        pow2 = pow2 << 1;
+      next_pow2 = pow2;
     end
   endfunction
 
-  function [ADDR_WIDTH-1:0] fit_addr;
-    input [TABLE_ADDR_WIDTH-1:0] addr;
+  /***************parameter*************/
+  localparam integer ENTRY_DEPTH_W     = 11;
+  localparam integer HASH_BUCKET_DEPTH = 8;
+  localparam integer HASH_BUCKET_NUM   = next_pow2(NUM_ENTRY);
+  localparam integer HASH_BUCKET_W     = (HASH_BUCKET_NUM <= 1) ? 1 : $clog2(HASH_BUCKET_NUM);
+  localparam integer HASH_SLOT_W       = (HASH_BUCKET_DEPTH <= 1) ? 1 : $clog2(HASH_BUCKET_DEPTH);
+  localparam integer BUCKET_SLOT_W     = ENTRY_ADDR_W + 1;
+
+  localparam integer ENTRY_VALID_LSB       = 0;
+  localparam integer ENTRY_DEPTH_LSB       = ENTRY_VALID_LSB + 1;
+  localparam integer ENTRY_HEAD_LSB        = ENTRY_DEPTH_LSB + ENTRY_DEPTH_W;
+  localparam integer ENTRY_TAIL_LSB        = ENTRY_HEAD_LSB + 20;
+  localparam integer ENTRY_FLOW_LSB        = ENTRY_TAIL_LSB + 20;
+  localparam integer ENTRY_BUCKET_IDX_LSB  = ENTRY_FLOW_LSB + 32;
+  localparam integer ENTRY_BUCKET_SLOT_LSB = ENTRY_BUCKET_IDX_LSB + HASH_BUCKET_W;
+  localparam integer ENTRY_WORD_W          = ENTRY_BUCKET_SLOT_LSB + HASH_SLOT_W;
+
+  localparam [3:0] SEARCH_IDLE        = 4'd0;
+  localparam [3:0] SEARCH_HASH_MUL0   = 4'd1;
+  localparam [3:0] SEARCH_HASH_XOR1   = 4'd2;
+  localparam [3:0] SEARCH_HASH_MUL1   = 4'd3;
+  localparam [3:0] SEARCH_HASH_DONE   = 4'd4;
+  localparam [3:0] SEARCH_WAIT_BUCKET = 4'd5;
+  localparam [3:0] SEARCH_PRI_SLOT    = 4'd6;
+  localparam [3:0] SEARCH_PRI_ENTRY   = 4'd7;
+  localparam [3:0] SEARCH_SEC_SLOT    = 4'd8;
+  localparam [3:0] SEARCH_SEC_ENTRY   = 4'd9;
+  localparam [3:0] SEARCH_PRI_WAIT    = 4'd10;
+  localparam [3:0] SEARCH_SEC_WAIT    = 4'd11;
+
+  localparam [31:0] MIX32_MUL0 = 32'h7feb352d;
+  localparam [31:0] MIX32_MUL1 = 32'h846ca68b;
+
+  function [31:0] mix32;
+    input [31:0] x;
+    reg   [31:0] y;
     begin
-      fit_addr = addr[ADDR_WIDTH-1:0];
+      y = x;
+      y = y ^ (y >> 16);
+      y = y * MIX32_MUL0;
+      y = y ^ (y >> 15);
+      y = y * MIX32_MUL1;
+      y = y ^ (y >> 16);
+      mix32 = y;
     end
   endfunction
 
-  function [TABLE_ADDR_WIDTH-1:0] next_table_addr;
-    input [TABLE_ADDR_WIDTH-1:0] addr;
+  function [HASH_BUCKET_W-1:0] primary_bucket_idx;
+    input [31:0] flow_id;
+    reg   [31:0] h;
     begin
-      next_table_addr = (addr == TABLE_SIZE - 1) ? {TABLE_ADDR_WIDTH{1'b0}} : (addr + 1'b1);
+      h = mix32(flow_id);
+      primary_bucket_idx = h[HASH_BUCKET_W-1:0];
+    end
+  endfunction
+
+  function [HASH_BUCKET_W-1:0] secondary_bucket_idx;
+    input [31:0] flow_id;
+    reg [HASH_BUCKET_W-1:0] pri;
+    reg [HASH_BUCKET_W-1:0] sec;
+    reg [31:0]              h;
+    begin
+      h = mix32(flow_id);
+      pri = h[HASH_BUCKET_W-1:0];
+      sec = h[31 -: HASH_BUCKET_W] ^ pri;
+      if (sec == pri)
+        secondary_bucket_idx = pri + {{(HASH_BUCKET_W-1){1'b0}}, 1'b1};
+      else
+        secondary_bucket_idx = sec;
+    end
+  endfunction
+
+  function [ENTRY_WORD_W-1:0] pack_entry;
+    input                         valid;
+    input [31:0]                  flow_id;
+    input [19:0]                  head;
+    input [19:0]                  tail;
+    input [ENTRY_DEPTH_W-1:0]     depth;
+    input [HASH_BUCKET_W-1:0]     bucket_idx;
+    input [HASH_SLOT_W-1:0]       bucket_slot;
+    begin
+      pack_entry = {ENTRY_WORD_W{1'b0}};
+      pack_entry[ENTRY_VALID_LSB] = valid;
+      pack_entry[ENTRY_DEPTH_LSB +: ENTRY_DEPTH_W] = depth;
+      pack_entry[ENTRY_HEAD_LSB +: 20] = head;
+      pack_entry[ENTRY_TAIL_LSB +: 20] = tail;
+      pack_entry[ENTRY_FLOW_LSB +: 32] = flow_id;
+      pack_entry[ENTRY_BUCKET_IDX_LSB +: HASH_BUCKET_W] = bucket_idx;
+      pack_entry[ENTRY_BUCKET_SLOT_LSB +: HASH_SLOT_W] = bucket_slot;
     end
   endfunction
 
   /***************reg*******************/
-  (* ram_style = "block" *) reg [ENTRY_WIDTH-1:0] hash_entry [0:TABLE_SIZE-1];
+  reg                             r_entry_wr_en;
+  reg      [ENTRY_ADDR_W-1:0]     r_entry_wr_addr;
+  reg      [ENTRY_WORD_W-1:0]     r_entry_wr_data;
+  reg      [ENTRY_ADDR_W-1:0]     r_entry_rd_addr;
+  wire     [ENTRY_WORD_W-1:0]     r_entry_rd_data;
 
-  reg hash_wr_en;
-  reg [TABLE_ADDR_WIDTH-1:0] hash_wr_addr;
-  reg [ENTRY_WIDTH-1:0] hash_wr_data;
-  reg [TABLE_ADDR_WIDTH-1:0] hash_rd_addr;
-  reg [ENTRY_WIDTH-1:0] hash_rd_data;
-  reg init_active;
-  reg init_wait_release;
-  reg [TABLE_ADDR_WIDTH-1:0] init_idx;
-  reg [2:0] search_state;
-  reg [31:0] search_flow_id_q;
-  reg [BUCKET_ID_WIDTH-1:0] search_bucket_id_q;
-  reg [TABLE_ADDR_WIDTH-1:0] search_slot_idx;
-  reg [TABLE_ADDR_WIDTH-1:0] search_free_slot;
-  reg search_free_valid;
-  reg [TABLE_ADDR_WIDTH-1:0] search_addr_q;
-  reg [TABLE_ADDR_WIDTH-1:0] matched_entry_addr;
-  reg [ENTRY_WIDTH-1:0] matched_entry;
-  reg matched_entry_valid;
-  reg [TABLE_ADDR_WIDTH-1:0] allocated_entry_addr;
-  reg [ENTRY_WIDTH-1:0] allocated_entry;
-  reg allocated_entry_valid;
-  reg [1:0] scan_state;
-  reg [TABLE_ADDR_WIDTH-1:0] scan_addr;
-  reg [TABLE_ADDR_WIDTH-1:0] scan_addr_q;
-  reg [TABLE_ADDR_WIDTH-1:0] dequeue_entry_addr;
-  reg [ENTRY_WIDTH-1:0] dequeue_entry;
-  reg dequeue_entry_valid;
+  reg                             r_init_req_dly;
+  reg                             r_init_busy;
+  reg      [HASH_BUCKET_W-1:0]    r_init_bucket_addr;
+  reg      [ENTRY_ADDR_W-1:0]     r_init_entry_addr;
+  reg                             r_init_bucket_done;
+  reg                             r_init_entry_done;
 
-  wire search_last_slot = (search_slot_idx == (BUCKET_DEPTH - 1));
-  wire [TABLE_ADDR_WIDTH-1:0] search_addr_calc = bucket_slot_addr_int(search_bucket_id_q, search_slot_idx);
+  reg      [ENTRY_ADDR_W-1:0]     r_free_entry_fifo  [0:NUM_ENTRY-1];
+  reg      [ENTRY_ADDR_W-1:0]     r_free_entry_rd_ptr;
+  reg      [ENTRY_ADDR_W-1:0]     r_free_entry_wr_ptr;
+  reg      [ENTRY_ADDR_W:0]       r_free_entry_count;
+  reg      [ENTRY_ADDR_W-1:0]     r_free_entry_front_addr;
+  reg      [ENTRY_ADDR_W-1:0]     r_pending_alloc_addr;
+  reg                             r_pending_alloc_vld;
+  reg      [31:0]                 r_pending_flow_id;
+  reg      [19:0]                 r_pending_head;
+  reg      [HASH_BUCKET_W-1:0]    r_pending_bucket_idx;
+  reg      [HASH_SLOT_W-1:0]      r_pending_bucket_slot;
 
-  assign hash_search_busy = init_req | init_active | (search_state != SEARCH_IDLE) |
-                            hash_matched | hash_mismatched | ptr_read | dequeue_entry_valid;
+  reg      [ENTRY_ADDR_W-1:0]     r_read_entry_addr;
+  reg      [ENTRY_WORD_W-1:0]     r_read_entry_word;
+  reg      [ENTRY_WORD_W-1:0]     r_match_entry_word;
 
-  always @*
-  begin
-    hash_wr_en = 1'b0;
-    hash_wr_addr = {TABLE_ADDR_WIDTH{1'b0}};
-    hash_wr_data = {ENTRY_WIDTH{1'b0}};
+  reg      [HASH_BUCKET_W-1:0]    r_primary_bucket_rd_addr;
+  reg      [HASH_BUCKET_W-1:0]    r_secondary_bucket_rd_addr;
+  reg      [HASH_BUCKET_DEPTH-1:0] r_bucket_wr_en;
+  reg      [HASH_BUCKET_W-1:0]    r_bucket_wr_addr [0:HASH_BUCKET_DEPTH-1];
+  reg      [BUCKET_SLOT_W-1:0]    r_bucket_wr_data [0:HASH_BUCKET_DEPTH-1];
 
-    if (init_active)
-    begin
-      hash_wr_en = 1'b1;
-      hash_wr_addr = init_idx;
+  reg      [3:0]                  r_search_state;
+  reg      [31:0]                 r_search_flow_id;
+  reg      [31:0]                 r_hash_xor0;
+  reg      [31:0]                 r_hash_mul0;
+  reg      [31:0]                 r_hash_xor1;
+  reg      [31:0]                 r_hash_mul1;
+  reg      [HASH_BUCKET_W-1:0]    r_search_primary_bucket;
+  reg      [HASH_BUCKET_W-1:0]    r_search_secondary_bucket;
+  reg      [HASH_SLOT_W-1:0]      r_search_slot;
+  reg      [ENTRY_ADDR_W-1:0]     r_search_candidate_addr;
+  reg                             r_search_empty_avail;
+  reg      [HASH_BUCKET_W-1:0]    r_search_empty_bucket_idx;
+  reg      [HASH_SLOT_W-1:0]      r_search_empty_slot_idx;
+
+  reg      [ENTRY_ADDR_W-1:0]     r_deq_scan_addr;
+  reg      [ENTRY_ADDR_W-1:0]     r_deq_wait_addr;
+  reg                             r_deq_wait_vld;
+  reg      [ENTRY_ADDR_W-1:0]     r_deq_check_addr;
+  reg                             r_deq_check_vld;
+  reg      [ENTRY_ADDR_W:0]       r_deq_scan_count;
+  reg                             r_deq_fallback_vld;
+  reg      [ENTRY_ADDR_W-1:0]     r_deq_fallback_addr;
+  reg      [ENTRY_WORD_W-1:0]     r_deq_fallback_word;
+
+  integer                         i;
+  integer                         s;
+
+  /***************wire******************/
+  wire     [BUCKET_SLOT_W-1:0]    w_primary_bucket_rd_data [0:HASH_BUCKET_DEPTH-1];
+  wire     [BUCKET_SLOT_W-1:0]    w_secondary_bucket_rd_data [0:HASH_BUCKET_DEPTH-1];
+  wire                            w_start_search;
+
+  wire                            w_entry_valid;
+  wire     [ENTRY_DEPTH_W-1:0]    w_entry_depth;
+  wire     [19:0]                 w_entry_head;
+  wire     [19:0]                 w_entry_tail;
+  wire     [31:0]                 w_entry_flow_id;
+  wire     [HASH_BUCKET_W-1:0]    w_entry_bucket_idx;
+  wire     [HASH_SLOT_W-1:0]      w_entry_bucket_slot;
+  wire                            w_entry_nonempty;
+  wire                            w_entry_meets_threshold;
+
+  wire                            w_match_valid;
+  wire     [ENTRY_DEPTH_W-1:0]    w_match_depth;
+  wire     [19:0]                 w_match_head;
+  wire     [31:0]                 w_match_flow_id;
+  wire     [HASH_BUCKET_W-1:0]    w_match_bucket_idx;
+  wire     [HASH_SLOT_W-1:0]      w_match_bucket_slot;
+
+  wire                            w_read_valid;
+  wire     [ENTRY_DEPTH_W-1:0]    w_read_depth;
+  wire     [19:0]                 w_read_tail;
+  wire     [31:0]                 w_read_flow_id;
+  wire     [HASH_BUCKET_W-1:0]    w_read_bucket_idx;
+  wire     [HASH_SLOT_W-1:0]      w_read_bucket_slot;
+
+  wire     [ENTRY_DEPTH_W-1:0]    w_match_depth_inc;
+  wire     [ENTRY_DEPTH_W-1:0]    w_depth_max;
+  wire     [ENTRY_DEPTH_W-1:0]    w_pending_depth;
+  wire     [ENTRY_DEPTH_W-1:0]    w_read_depth_dec;
+  wire     [ENTRY_ADDR_W-1:0]     w_free_front_addr;
+  wire     [31:0]                 w_hash_final;
+  wire     [HASH_BUCKET_W-1:0]    w_hash_primary_bucket;
+  wire     [HASH_BUCKET_W-1:0]    w_hash_secondary_raw;
+  wire     [HASH_BUCKET_W-1:0]    w_hash_secondary_bucket;
+
+  assign w_start_search = i_search_req && !r_init_busy && (r_search_state == SEARCH_IDLE);
+
+  assign w_entry_valid       = r_entry_rd_data[ENTRY_VALID_LSB];
+  assign w_entry_depth       = r_entry_rd_data[ENTRY_DEPTH_LSB +: ENTRY_DEPTH_W];
+  assign w_entry_head        = r_entry_rd_data[ENTRY_HEAD_LSB +: 20];
+  assign w_entry_tail        = r_entry_rd_data[ENTRY_TAIL_LSB +: 20];
+  assign w_entry_flow_id     = r_entry_rd_data[ENTRY_FLOW_LSB +: 32];
+  assign w_entry_bucket_idx  = r_entry_rd_data[ENTRY_BUCKET_IDX_LSB +: HASH_BUCKET_W];
+  assign w_entry_bucket_slot = r_entry_rd_data[ENTRY_BUCKET_SLOT_LSB +: HASH_SLOT_W];
+  assign w_entry_nonempty    = w_entry_valid && (w_entry_depth != {ENTRY_DEPTH_W{1'b0}});
+  assign w_entry_meets_threshold = w_entry_nonempty &&
+         ((READ_DEPTH_THRESHOLD == 0) ||
+          (w_entry_depth > READ_DEPTH_THRESHOLD));
+
+  assign w_match_valid       = r_match_entry_word[ENTRY_VALID_LSB];
+  assign w_match_depth       = r_match_entry_word[ENTRY_DEPTH_LSB +: ENTRY_DEPTH_W];
+  assign w_match_head        = r_match_entry_word[ENTRY_HEAD_LSB +: 20];
+  assign w_match_flow_id     = r_match_entry_word[ENTRY_FLOW_LSB +: 32];
+  assign w_match_bucket_idx  = r_match_entry_word[ENTRY_BUCKET_IDX_LSB +: HASH_BUCKET_W];
+  assign w_match_bucket_slot = r_match_entry_word[ENTRY_BUCKET_SLOT_LSB +: HASH_SLOT_W];
+
+  assign w_read_valid       = r_read_entry_word[ENTRY_VALID_LSB];
+  assign w_read_depth       = r_read_entry_word[ENTRY_DEPTH_LSB +: ENTRY_DEPTH_W];
+  assign w_read_tail        = r_read_entry_word[ENTRY_TAIL_LSB +: 20];
+  assign w_read_flow_id     = r_read_entry_word[ENTRY_FLOW_LSB +: 32];
+  assign w_read_bucket_idx  = r_read_entry_word[ENTRY_BUCKET_IDX_LSB +: HASH_BUCKET_W];
+  assign w_read_bucket_slot = r_read_entry_word[ENTRY_BUCKET_SLOT_LSB +: HASH_SLOT_W];
+
+  assign w_depth_max       = {ENTRY_DEPTH_W{1'b1}};
+  assign w_match_depth_inc = i_pkt_done ? ((w_match_depth == w_depth_max) ? w_match_depth : (w_match_depth + 1'b1)) : w_match_depth;
+  assign w_pending_depth   = i_pkt_done ? {{(ENTRY_DEPTH_W-1){1'b0}}, 1'b1} : {ENTRY_DEPTH_W{1'b0}};
+  assign w_read_depth_dec  = w_read_depth - 1'b1;
+  assign w_free_front_addr = r_free_entry_fifo[r_free_entry_rd_ptr];
+  assign w_hash_final      = r_hash_mul1 ^ (r_hash_mul1 >> 16);
+  assign w_hash_primary_bucket = w_hash_final[HASH_BUCKET_W-1:0];
+  assign w_hash_secondary_raw  = w_hash_final[31 -: HASH_BUCKET_W] ^ w_hash_primary_bucket;
+  assign w_hash_secondary_bucket =
+         (w_hash_secondary_raw == w_hash_primary_bucket) ?
+         (w_hash_primary_bucket + {{(HASH_BUCKET_W-1){1'b0}}, 1'b1}) :
+         w_hash_secondary_raw;
+
+  /***************component*************/
+  generate
+    genvar slot_idx;
+    for (slot_idx = 0; slot_idx < 8; slot_idx = slot_idx + 1)
+    begin : BUCKET_SLOT_RAM
+      fmt_bucket_slot_ram u_fmt_bucket_slot_ram_primary (
+                            .clka  (i_clk                     ),
+                            .wea   (r_bucket_wr_en[slot_idx]  ),
+                            .addra (r_bucket_wr_addr[slot_idx]),
+                            .dina  (r_bucket_wr_data[slot_idx]),
+                            .clkb  (i_clk                     ),
+                            .enb   (1'b1                      ),
+                            .addrb (r_primary_bucket_rd_addr  ),
+                            .doutb (w_primary_bucket_rd_data[slot_idx])
+                          );
+
+      fmt_bucket_slot_ram u_fmt_bucket_slot_ram_secondary (
+                            .clka  (i_clk                     ),
+                            .wea   (r_bucket_wr_en[slot_idx]  ),
+                            .addra (r_bucket_wr_addr[slot_idx]),
+                            .dina  (r_bucket_wr_data[slot_idx]),
+                            .clkb  (i_clk                     ),
+                            .enb   (1'b1                      ),
+                            .addrb (r_secondary_bucket_rd_addr),
+                            .doutb (w_secondary_bucket_rd_data[slot_idx])
+                          );
     end
-    else if (!init_req)
-    begin
-      if (hash_wr_head_req && search_free_valid)
-      begin
-        hash_wr_en = 1'b1;
-        hash_wr_addr = search_free_slot;
-        hash_wr_data = make_entry(1'b1, 4'd0, search_flow_id_q, hash_wr_head, hash_wr_head);
-      end
-      else if (hash_wr_tail_req && allocated_entry_valid)
-      begin
-        hash_wr_en = 1'b1;
-        hash_wr_addr = allocated_entry_addr;
-        hash_wr_data = make_entry(1'b1, depth_flag ? 4'd1 : 4'd0,
-                                  allocated_entry[71:40], allocated_entry[39:20], hash_wr_tail);
-      end
-      else if (hash_wr_search_ack && matched_entry_valid)
-      begin
-        hash_wr_en = 1'b1;
-        hash_wr_addr = matched_entry_addr;
-        hash_wr_data = make_entry(1'b1,
-                                  depth_flag ? (matched_entry[75:72] + 1'b1) : matched_entry[75:72],
-                                  matched_entry[71:40], matched_entry[39:20], hash_refresh_tail);
-      end
-      else if (hash_refresh_head_flag && dequeue_entry_valid)
-      begin
-        hash_wr_en = 1'b1;
-        hash_wr_addr = dequeue_entry_addr;
-        if (dequeue_entry[75:72] == 4'd1)
-          hash_wr_data = {ENTRY_WIDTH{1'b0}};
-        else
-          hash_wr_data = make_entry(1'b1, dequeue_entry[75:72] - 1'b1,
-                                    dequeue_entry[71:40], hash_refresh_head, dequeue_entry[19:0]);
-      end
-    end
-  end
+  endgenerate
 
-  always @(posedge clk)
-  begin
-    if (hash_wr_en)
-      hash_entry[hash_wr_addr] <= hash_wr_data;
-    hash_rd_data <= hash_entry[hash_rd_addr];
-  end
+  /***************entry ram*************/
+  fmt_entry_ram  u_fmt_entry_ram (
+      .clka  (i_clk),
+      .wea   (r_entry_wr_en),
+      .addra (r_entry_wr_addr),
+      .dina  (r_entry_wr_data),
+      .clkb  (i_clk),
+      .addrb (r_entry_rd_addr),
+      .doutb (r_entry_rd_data)
+  );
 
-  always @(posedge clk)
+  /***************always****************/
+  always @(posedge i_clk)
   begin
-    if (reset)
+    if (i_rst)
     begin
-      init_ack <= 1'b0;
-      init_active <= 1'b0;
-      init_wait_release <= 1'b0;
-      init_idx <= {TABLE_ADDR_WIDTH{1'b0}};
-      hash_matched <= 1'b0;
-      hash_mismatched <= 1'b0;
-      hash_match_tail <= 20'd0;
-      hash_match_addr <= {ADDR_WIDTH{1'b0}};
-      ptr_read <= 1'b0;
-      hash_read_head <= 20'd0;
-      read_mode_flag <= 1'b0;
-      search_state <= SEARCH_IDLE;
-      search_flow_id_q <= 32'd0;
-      search_bucket_id_q <= {BUCKET_ID_WIDTH{1'b0}};
-      search_slot_idx <= {TABLE_ADDR_WIDTH{1'b0}};
-      search_free_slot <= {TABLE_ADDR_WIDTH{1'b0}};
-      search_free_valid <= 1'b0;
-      search_addr_q <= {TABLE_ADDR_WIDTH{1'b0}};
-      hash_rd_addr <= {TABLE_ADDR_WIDTH{1'b0}};
-      matched_entry_addr <= {TABLE_ADDR_WIDTH{1'b0}};
-      matched_entry <= {ENTRY_WIDTH{1'b0}};
-      matched_entry_valid <= 1'b0;
-      allocated_entry_addr <= {TABLE_ADDR_WIDTH{1'b0}};
-      allocated_entry <= {ENTRY_WIDTH{1'b0}};
-      allocated_entry_valid <= 1'b0;
-      scan_state <= SCAN_READ;
-      scan_addr <= {TABLE_ADDR_WIDTH{1'b0}};
-      scan_addr_q <= {TABLE_ADDR_WIDTH{1'b0}};
-      dequeue_entry_addr <= {TABLE_ADDR_WIDTH{1'b0}};
-      dequeue_entry <= {ENTRY_WIDTH{1'b0}};
-      dequeue_entry_valid <= 1'b0;
+      r_entry_wr_en           <= 1'b0;
+      r_entry_wr_addr         <= {ENTRY_ADDR_W{1'b0}};
+      r_entry_wr_data         <= {ENTRY_WORD_W{1'b0}};
+      r_entry_rd_addr         <= {ENTRY_ADDR_W{1'b0}};
+      r_init_req_dly          <= 1'b0;
+      r_init_busy             <= 1'b0;
+      r_init_bucket_addr      <= {HASH_BUCKET_W{1'b0}};
+      r_init_entry_addr       <= {ENTRY_ADDR_W{1'b0}};
+      r_init_bucket_done      <= 1'b0;
+      r_init_entry_done       <= 1'b0;
+      o_init_ack              <= 1'b0;
+      o_search_hit            <= 1'b0;
+      o_search_miss           <= 1'b0;
+      o_match_tail            <= 20'd0;
+      o_match_addr            <= {ENTRY_ADDR_W{1'b0}};
+      r_free_entry_rd_ptr     <= {ENTRY_ADDR_W{1'b0}};
+      r_free_entry_wr_ptr     <= {ENTRY_ADDR_W{1'b0}};
+      r_free_entry_count      <= NUM_ENTRY[ENTRY_ADDR_W:0];
+      r_free_entry_front_addr <= {ENTRY_ADDR_W{1'b0}};
+      r_pending_alloc_addr    <= {ENTRY_ADDR_W{1'b0}};
+      r_pending_alloc_vld     <= 1'b0;
+      r_pending_flow_id       <= 32'd0;
+      r_pending_head          <= 20'd0;
+      r_pending_bucket_idx    <= {HASH_BUCKET_W{1'b0}};
+      r_pending_bucket_slot   <= {HASH_SLOT_W{1'b0}};
+      r_read_entry_addr       <= {ENTRY_ADDR_W{1'b0}};
+      r_read_entry_word       <= {ENTRY_WORD_W{1'b0}};
+      r_match_entry_word      <= {ENTRY_WORD_W{1'b0}};
+      r_primary_bucket_rd_addr <= {HASH_BUCKET_W{1'b0}};
+      r_secondary_bucket_rd_addr <= {HASH_BUCKET_W{1'b0}};
+      r_search_state          <= SEARCH_IDLE;
+      r_search_flow_id        <= 32'd0;
+      r_hash_xor0             <= 32'd0;
+      r_hash_mul0             <= 32'd0;
+      r_hash_xor1             <= 32'd0;
+      r_hash_mul1             <= 32'd0;
+      r_search_primary_bucket <= {HASH_BUCKET_W{1'b0}};
+      r_search_secondary_bucket <= {HASH_BUCKET_W{1'b0}};
+      r_search_slot           <= {HASH_SLOT_W{1'b0}};
+      r_search_candidate_addr <= {ENTRY_ADDR_W{1'b0}};
+      r_search_empty_avail    <= 1'b0;
+      r_search_empty_bucket_idx <= {HASH_BUCKET_W{1'b0}};
+      r_search_empty_slot_idx <= {HASH_SLOT_W{1'b0}};
+      r_deq_scan_addr         <= {ENTRY_ADDR_W{1'b0}};
+      r_deq_wait_addr         <= {ENTRY_ADDR_W{1'b0}};
+      r_deq_wait_vld          <= 1'b0;
+      r_deq_check_addr        <= {ENTRY_ADDR_W{1'b0}};
+      r_deq_check_vld         <= 1'b0;
+      r_deq_scan_count        <= {(ENTRY_ADDR_W+1){1'b0}};
+      r_deq_fallback_vld      <= 1'b0;
+      r_deq_fallback_addr     <= {ENTRY_ADDR_W{1'b0}};
+      r_deq_fallback_word     <= {ENTRY_WORD_W{1'b0}};
+      o_dequeue_req           <= 1'b0;
+      o_flow_head             <= 20'd0;
+      for (s = 0; s < HASH_BUCKET_DEPTH; s = s + 1)
+      begin
+        r_bucket_wr_en[s]   <= 1'b0;
+        r_bucket_wr_addr[s] <= {HASH_BUCKET_W{1'b0}};
+        r_bucket_wr_data[s] <= {BUCKET_SLOT_W{1'b0}};
+      end
+      for (i = 0; i < NUM_ENTRY; i = i + 1)
+        r_free_entry_fifo[i] <= i[ENTRY_ADDR_W-1:0];
     end
     else
     begin
-      init_ack <= 1'b0;
+      r_init_req_dly          <= i_init_req;
+      o_init_ack              <= 1'b0;
+      r_entry_wr_en           <= 1'b0;
+      r_free_entry_front_addr <= r_free_entry_fifo[r_free_entry_rd_ptr];
+      o_search_hit            <= 1'b0;
+      o_search_miss           <= 1'b0;
 
-      if (hash_wr_search_ack | hash_wr_tail_req)
+      for (s = 0; s < HASH_BUCKET_DEPTH; s = s + 1)
+        r_bucket_wr_en[s] <= 1'b0;
+
+      if (i_refresh_head_vld)
+        o_dequeue_req <= 1'b0;
+
+      if (i_init_req && !r_init_req_dly)
       begin
-        hash_matched <= 1'b0;
-        hash_mismatched <= 1'b0;
-        matched_entry_valid <= 1'b0;
+        r_init_busy             <= 1'b1;
+        r_init_bucket_addr      <= {HASH_BUCKET_W{1'b0}};
+        r_init_entry_addr       <= {ENTRY_ADDR_W{1'b0}};
+        r_init_bucket_done      <= 1'b0;
+        r_init_entry_done       <= 1'b0;
+        r_free_entry_rd_ptr     <= {ENTRY_ADDR_W{1'b0}};
+        r_free_entry_wr_ptr     <= {ENTRY_ADDR_W{1'b0}};
+        r_free_entry_count      <= NUM_ENTRY[ENTRY_ADDR_W:0];
+        r_free_entry_front_addr <= {ENTRY_ADDR_W{1'b0}};
+        r_pending_alloc_addr    <= {ENTRY_ADDR_W{1'b0}};
+        r_pending_alloc_vld     <= 1'b0;
+        o_search_hit            <= 1'b0;
+        o_search_miss           <= 1'b0;
+        o_match_tail            <= 20'd0;
+        o_match_addr            <= {ENTRY_ADDR_W{1'b0}};
+        r_search_state          <= SEARCH_IDLE;
+        r_hash_xor0             <= 32'd0;
+        r_hash_mul0             <= 32'd0;
+        r_hash_xor1             <= 32'd0;
+        r_hash_mul1             <= 32'd0;
+        r_search_empty_avail    <= 1'b0;
+        r_deq_wait_vld          <= 1'b0;
+        r_deq_check_vld         <= 1'b0;
+        r_deq_scan_count        <= {(ENTRY_ADDR_W+1){1'b0}};
+        r_deq_fallback_vld      <= 1'b0;
+        o_dequeue_req           <= 1'b0;
+        o_flow_head             <= 20'd0;
+        for (i = 0; i < NUM_ENTRY; i = i + 1)
+          r_free_entry_fifo[i] <= i[ENTRY_ADDR_W-1:0];
       end
-
-      if (!init_req)
-        init_wait_release <= 1'b0;
-
-      if (init_req && !init_active && !init_wait_release)
+      else if (r_init_busy)
       begin
-        init_active <= 1'b1;
-        init_idx <= {TABLE_ADDR_WIDTH{1'b0}};
-      end
-
-      if (init_active)
-      begin
-        if (init_idx == (TABLE_SIZE - 1))
+        if (!r_init_bucket_done)
         begin
-          init_active <= 1'b0;
-          init_wait_release <= 1'b1;
-          init_ack <= 1'b1;
-        end
-        else
-          init_idx <= init_idx + 1'b1;
-      end
-      else if (!init_req)
-      begin
-        if (hash_wr_head_req && search_free_valid)
-        begin
-          allocated_entry_addr <= search_free_slot;
-          allocated_entry <= hash_wr_data;
-          allocated_entry_valid <= 1'b1;
-          search_free_valid <= 1'b0;
-        end
-        else if (hash_wr_tail_req && allocated_entry_valid)
-        begin
-          allocated_entry <= hash_wr_data;
-          allocated_entry_valid <= 1'b0;
-        end
-        else if (hash_wr_search_ack && matched_entry_valid)
-        begin
-          matched_entry <= hash_wr_data;
-        end
-        else if (hash_refresh_head_flag && dequeue_entry_valid)
-        begin
-          ptr_read <= 1'b0;
-          dequeue_entry_valid <= 1'b0;
-          scan_addr <= next_table_addr(dequeue_entry_addr);
-          scan_state <= SCAN_READ;
-        end
-
-        case (search_state)
-          SEARCH_IDLE:
+          for (s = 0; s < HASH_BUCKET_DEPTH; s = s + 1)
           begin
-            if (hash_wr_search && !hash_search_busy)
+            r_bucket_wr_en[s]   <= 1'b1;
+            r_bucket_wr_addr[s] <= r_init_bucket_addr;
+            r_bucket_wr_data[s] <= {BUCKET_SLOT_W{1'b0}};
+          end
+
+          if (r_init_bucket_addr == HASH_BUCKET_NUM - 1)
+            r_init_bucket_done <= 1'b1;
+          else
+            r_init_bucket_addr <= r_init_bucket_addr + 1'b1;
+        end
+
+        if (!r_init_entry_done)
+        begin
+          r_entry_wr_en   <= 1'b1;
+          r_entry_wr_addr <= r_init_entry_addr;
+          r_entry_wr_data <= {ENTRY_WORD_W{1'b0}};
+          if (r_init_entry_addr == NUM_ENTRY - 1)
+            r_init_entry_done <= 1'b1;
+          else
+            r_init_entry_addr <= r_init_entry_addr + 1'b1;
+        end
+
+        if (((r_init_bucket_done || (r_init_bucket_addr == HASH_BUCKET_NUM - 1)) &&
+             (r_init_entry_done  || (r_init_entry_addr == NUM_ENTRY - 1))))
+        begin
+          r_init_busy <= 1'b0;
+          o_init_ack  <= 1'b1;
+        end
+      end
+      else
+      begin
+        if (i_alloc_head_req)
+        begin
+          r_deq_scan_count   <= {(ENTRY_ADDR_W+1){1'b0}};
+          r_deq_fallback_vld <= 1'b0;
+          if ((r_free_entry_count != 0) && !r_pending_alloc_vld && r_search_empty_avail)
+          begin
+            r_pending_alloc_addr   <= w_free_front_addr;
+            r_pending_alloc_vld    <= 1'b1;
+            r_pending_flow_id      <= i_flow_id;
+            r_pending_head         <= i_alloc_head_data;
+            r_pending_bucket_idx   <= r_search_empty_bucket_idx;
+            r_pending_bucket_slot  <= r_search_empty_slot_idx;
+
+            r_entry_wr_en   <= 1'b1;
+            r_entry_wr_addr <= w_free_front_addr;
+            r_entry_wr_data <= pack_entry(1'b1, i_flow_id, i_alloc_head_data, 20'd0,
+                                          {ENTRY_DEPTH_W{1'b0}},
+                                          r_search_empty_bucket_idx, r_search_empty_slot_idx);
+
+            r_bucket_wr_en[r_search_empty_slot_idx]   <= 1'b1;
+            r_bucket_wr_addr[r_search_empty_slot_idx] <= r_search_empty_bucket_idx;
+            r_bucket_wr_data[r_search_empty_slot_idx] <= {1'b1, w_free_front_addr};
+          end
+        end
+        else if (i_alloc_tail_req)
+        begin
+          r_deq_scan_count   <= {(ENTRY_ADDR_W+1){1'b0}};
+          r_deq_fallback_vld <= 1'b0;
+          if (r_pending_alloc_vld)
+          begin
+            r_entry_wr_en   <= 1'b1;
+            r_entry_wr_addr <= r_pending_alloc_addr;
+            r_entry_wr_data <= pack_entry(1'b1, r_pending_flow_id, r_pending_head,
+                                          i_alloc_tail_data, w_pending_depth,
+                                          r_pending_bucket_idx, r_pending_bucket_slot);
+            if ((READ_DEPTH_THRESHOLD == 0) ||
+                (w_pending_depth >= READ_DEPTH_THRESHOLD))
             begin
-              hash_matched <= 1'b0;
-              hash_mismatched <= 1'b0;
-              hash_match_tail <= 20'd0;
-              hash_match_addr <= {ADDR_WIDTH{1'b0}};
-              matched_entry_valid <= 1'b0;
-              search_flow_id_q <= flow_ID;
-              search_bucket_id_q <= flow_hash_bucket(flow_ID);
-              search_slot_idx <= {TABLE_ADDR_WIDTH{1'b0}};
-              search_free_slot <= {TABLE_ADDR_WIDTH{1'b0}};
-              search_free_valid <= 1'b0;
-              search_state <= SEARCH_READ;
-              scan_state <= SCAN_READ;
+              r_deq_fallback_vld  <= 1'b1;
+              r_deq_fallback_addr <= r_pending_alloc_addr;
+              r_deq_fallback_word <= pack_entry(1'b1, r_pending_flow_id, r_pending_head,
+                                                i_alloc_tail_data, w_pending_depth,
+                                                r_pending_bucket_idx, r_pending_bucket_slot);
+            end
+            r_free_entry_rd_ptr <= next_ptr(r_free_entry_rd_ptr);
+            r_free_entry_count  <= r_free_entry_count - 1'b1;
+            r_pending_alloc_vld <= 1'b0;
+          end
+        end
+        else if (i_tail_update_req)
+        begin
+          r_deq_scan_count   <= {(ENTRY_ADDR_W+1){1'b0}};
+          r_deq_fallback_vld <= 1'b0;
+          if (w_match_valid)
+          begin
+            r_entry_wr_en   <= 1'b1;
+            r_entry_wr_addr <= o_match_addr;
+            r_entry_wr_data <= pack_entry(1'b1, w_match_flow_id, w_match_head,
+                                          i_refresh_tail, w_match_depth_inc,
+                                          w_match_bucket_idx, w_match_bucket_slot);
+            r_match_entry_word <= pack_entry(1'b1, w_match_flow_id, w_match_head,
+                                             i_refresh_tail, w_match_depth_inc,
+                                             w_match_bucket_idx, w_match_bucket_slot);
+            if ((READ_DEPTH_THRESHOLD == 0) ||
+                (w_match_depth_inc >= READ_DEPTH_THRESHOLD))
+            begin
+              r_deq_fallback_vld  <= 1'b1;
+              r_deq_fallback_addr <= o_match_addr;
+              r_deq_fallback_word <= pack_entry(1'b1, w_match_flow_id, w_match_head,
+                                                i_refresh_tail, w_match_depth_inc,
+                                                w_match_bucket_idx, w_match_bucket_slot);
             end
           end
-
-          SEARCH_READ:
+        end
+        else if (i_refresh_head_vld)
+        begin
+          r_deq_scan_count   <= {(ENTRY_ADDR_W+1){1'b0}};
+          r_deq_fallback_vld <= 1'b0;
+          if (w_read_valid)
           begin
-            search_addr_q <= search_addr_calc;
-            hash_rd_addr <= search_addr_calc;
-            search_state <= SEARCH_WAIT;
-          end
-
-          SEARCH_WAIT:
-          begin
-            search_state <= SEARCH_CHECK;
-          end
-
-          SEARCH_CHECK:
-          begin
-            if ((hash_rd_data[76] == 1'b1) && (hash_rd_data[71:40] == search_flow_id_q))
+            if (w_read_depth_dec == {ENTRY_DEPTH_W{1'b0}})
             begin
-              hash_matched <= 1'b1;
-              hash_mismatched <= 1'b0;
-              hash_match_tail <= hash_rd_data[19:0];
-              hash_match_addr <= fit_addr(search_addr_q);
-              matched_entry_addr <= search_addr_q;
-              matched_entry <= hash_rd_data;
-              matched_entry_valid <= 1'b1;
-              search_state <= SEARCH_IDLE;
+              r_entry_wr_en   <= 1'b1;
+              r_entry_wr_addr <= r_read_entry_addr;
+              r_entry_wr_data <= {ENTRY_WORD_W{1'b0}};
+              r_free_entry_fifo[r_free_entry_wr_ptr] <= r_read_entry_addr;
+              r_free_entry_wr_ptr                    <= next_ptr(r_free_entry_wr_ptr);
+              r_free_entry_count                     <= r_free_entry_count + 1'b1;
+              r_bucket_wr_en[w_read_bucket_slot]     <= 1'b1;
+              r_bucket_wr_addr[w_read_bucket_slot]   <= w_read_bucket_idx;
+              r_bucket_wr_data[w_read_bucket_slot]   <= {BUCKET_SLOT_W{1'b0}};
             end
             else
             begin
-              if ((hash_rd_data[76] == 1'b0) && !search_free_valid)
+              r_entry_wr_en   <= 1'b1;
+              r_entry_wr_addr <= r_read_entry_addr;
+              r_entry_wr_data <= pack_entry(1'b1, w_read_flow_id, i_refresh_head,
+                                            w_read_tail, w_read_depth_dec,
+                                            w_read_bucket_idx, w_read_bucket_slot);
+              r_read_entry_word <= pack_entry(1'b1, w_read_flow_id, i_refresh_head,
+                                              w_read_tail, w_read_depth_dec,
+                                              w_read_bucket_idx, w_read_bucket_slot);
+              if ((READ_DEPTH_THRESHOLD == 0) ||
+                  (w_read_depth_dec >= READ_DEPTH_THRESHOLD))
               begin
-                search_free_slot <= search_addr_q;
-                search_free_valid <= 1'b1;
-              end
-              if (search_last_slot)
-              begin
-                hash_matched <= 1'b0;
-                hash_mismatched <= 1'b1;
-                search_state <= SEARCH_IDLE;
-              end
-              else
-              begin
-                search_slot_idx <= search_slot_idx + 1'b1;
-                search_state <= SEARCH_READ;
+                r_deq_fallback_vld  <= 1'b1;
+                r_deq_fallback_addr <= r_read_entry_addr;
+                r_deq_fallback_word <= pack_entry(1'b1, w_read_flow_id, i_refresh_head,
+                                                  w_read_tail, w_read_depth_dec,
+                                                  w_read_bucket_idx, w_read_bucket_slot);
               end
             end
           end
+        end
 
-          default:
-          begin
-            search_state <= SEARCH_IDLE;
-          end
-        endcase
-
-        if (!hash_wr_search && (search_state == SEARCH_IDLE) &&
-            !hash_matched && !hash_mismatched && !ptr_read)
+        if (w_start_search)
         begin
-          case (scan_state)
-            SCAN_READ:
+          r_search_flow_id           <= i_flow_id;
+          r_hash_xor0                <= i_flow_id ^ (i_flow_id >> 16);
+          r_hash_mul0                <= 32'd0;
+          r_hash_xor1                <= 32'd0;
+          r_hash_mul1                <= 32'd0;
+          r_search_slot              <= {HASH_SLOT_W{1'b0}};
+          r_search_empty_avail       <= 1'b0;
+          r_search_empty_bucket_idx  <= {HASH_BUCKET_W{1'b0}};
+          r_search_empty_slot_idx    <= {HASH_SLOT_W{1'b0}};
+          r_search_state             <= SEARCH_HASH_MUL0;
+          r_deq_wait_vld             <= 1'b0;
+          r_deq_check_vld            <= 1'b0;
+          o_search_hit               <= 1'b0;
+          o_search_miss              <= 1'b0;
+        end
+        else
+        begin
+          case (r_search_state)
+            SEARCH_HASH_MUL0:
             begin
-              scan_addr_q <= scan_addr;
-              hash_rd_addr <= scan_addr;
-              scan_state <= SCAN_WAIT;
+              r_hash_mul0    <= r_hash_xor0 * MIX32_MUL0;
+              r_search_state <= SEARCH_HASH_XOR1;
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
             end
-            SCAN_WAIT:
+            SEARCH_HASH_XOR1:
             begin
-              scan_state <= SCAN_CHECK;
+              r_hash_xor1    <= r_hash_mul0 ^ (r_hash_mul0 >> 15);
+              r_search_state <= SEARCH_HASH_MUL1;
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
             end
-            SCAN_CHECK:
+            SEARCH_HASH_MUL1:
             begin
-              if ((hash_rd_data[76] == 1'b1) && (hash_rd_data[75:72] > 4'd0))
+              r_hash_mul1    <= r_hash_xor1 * MIX32_MUL1;
+              r_search_state <= SEARCH_HASH_DONE;
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
+            end
+            SEARCH_HASH_DONE:
+            begin
+              r_primary_bucket_rd_addr   <= w_hash_primary_bucket;
+              r_secondary_bucket_rd_addr <= w_hash_secondary_bucket;
+              r_search_primary_bucket    <= w_hash_primary_bucket;
+              r_search_secondary_bucket  <= w_hash_secondary_bucket;
+              r_search_slot              <= {HASH_SLOT_W{1'b0}};
+              r_search_state             <= SEARCH_WAIT_BUCKET;
+              r_deq_wait_vld             <= 1'b0;
+              r_deq_check_vld            <= 1'b0;
+            end
+            SEARCH_WAIT_BUCKET:
+            begin
+              r_search_slot  <= {HASH_SLOT_W{1'b0}};
+              r_search_state <= SEARCH_PRI_SLOT;
+              r_deq_check_vld <= 1'b0;
+            end
+            SEARCH_PRI_SLOT:
+            begin
+              r_deq_check_vld <= 1'b0;
+              if (w_primary_bucket_rd_data[r_search_slot][ENTRY_ADDR_W])
               begin
-                ptr_read <= 1'b1;
-                hash_read_head <= hash_rd_data[39:20];
-                read_mode_flag <= hash_rd_data[76];
-                dequeue_entry_addr <= scan_addr_q;
-                dequeue_entry <= hash_rd_data;
-                dequeue_entry_valid <= 1'b1;
+                r_search_candidate_addr <= w_primary_bucket_rd_data[r_search_slot][ENTRY_ADDR_W-1:0];
+                r_entry_rd_addr         <= w_primary_bucket_rd_data[r_search_slot][ENTRY_ADDR_W-1:0];
+                r_search_state          <= SEARCH_PRI_WAIT;
               end
               else
               begin
-                scan_addr <= next_table_addr(scan_addr_q);
-                scan_state <= SCAN_READ;
+                if (!r_search_empty_avail)
+                begin
+                  r_search_empty_avail      <= 1'b1;
+                  r_search_empty_bucket_idx <= r_search_primary_bucket;
+                  r_search_empty_slot_idx   <= r_search_slot;
+                end
+                if (r_search_slot == HASH_BUCKET_DEPTH - 1)
+                begin
+                  r_search_slot  <= {HASH_SLOT_W{1'b0}};
+                  r_search_state <= SEARCH_SEC_SLOT;
+                end
+                else
+                  r_search_slot <= r_search_slot + 1'b1;
               end
             end
-
-            default:
+            SEARCH_PRI_WAIT:
             begin
-              scan_state <= SCAN_READ;
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
+              r_search_state  <= SEARCH_PRI_ENTRY;
             end
+            SEARCH_PRI_ENTRY:
+            begin
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
+              if (w_entry_valid &&
+                  (w_entry_flow_id == r_search_flow_id))
+              begin
+                o_search_hit       <= 1'b1;
+                o_search_miss      <= 1'b0;
+                o_match_tail       <= w_entry_tail;
+                o_match_addr       <= r_search_candidate_addr;
+                r_match_entry_word <= r_entry_rd_data;
+                r_search_state     <= SEARCH_IDLE;
+              end
+              else if (r_search_slot == HASH_BUCKET_DEPTH - 1)
+              begin
+                r_search_slot  <= {HASH_SLOT_W{1'b0}};
+                r_search_state <= SEARCH_SEC_SLOT;
+              end
+              else
+              begin
+                r_search_slot  <= r_search_slot + 1'b1;
+                r_search_state <= SEARCH_PRI_SLOT;
+              end
+            end
+            SEARCH_SEC_SLOT:
+            begin
+              r_deq_check_vld <= 1'b0;
+              if (w_secondary_bucket_rd_data[r_search_slot][ENTRY_ADDR_W])
+              begin
+                r_search_candidate_addr <= w_secondary_bucket_rd_data[r_search_slot][ENTRY_ADDR_W-1:0];
+                r_entry_rd_addr         <= w_secondary_bucket_rd_data[r_search_slot][ENTRY_ADDR_W-1:0];
+                r_search_state          <= SEARCH_SEC_WAIT;
+              end
+              else
+              begin
+                if (!r_search_empty_avail)
+                begin
+                  r_search_empty_avail      <= 1'b1;
+                  r_search_empty_bucket_idx <= r_search_secondary_bucket;
+                  r_search_empty_slot_idx   <= r_search_slot;
+                end
+                if (r_search_slot == HASH_BUCKET_DEPTH - 1)
+                begin
+                  o_search_hit   <= 1'b0;
+                  o_search_miss  <= 1'b1;
+                  o_match_tail   <= 20'd0;
+                  o_match_addr   <= {ENTRY_ADDR_W{1'b0}};
+                  r_search_state <= SEARCH_IDLE;
+                end
+                else
+                  r_search_slot <= r_search_slot + 1'b1;
+              end
+            end
+            SEARCH_SEC_WAIT:
+            begin
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
+              r_search_state  <= SEARCH_SEC_ENTRY;
+            end
+            SEARCH_SEC_ENTRY:
+            begin
+              r_deq_wait_vld  <= 1'b0;
+              r_deq_check_vld <= 1'b0;
+              if (w_entry_valid &&
+                  (w_entry_flow_id == r_search_flow_id))
+              begin
+                o_search_hit       <= 1'b1;
+                o_search_miss      <= 1'b0;
+                o_match_tail       <= w_entry_tail;
+                o_match_addr       <= r_search_candidate_addr;
+                r_match_entry_word <= r_entry_rd_data;
+                r_search_state     <= SEARCH_IDLE;
+              end
+              else if (r_search_slot == HASH_BUCKET_DEPTH - 1)
+              begin
+                o_search_hit   <= 1'b0;
+                o_search_miss  <= 1'b1;
+                o_match_tail   <= 20'd0;
+                o_match_addr   <= {ENTRY_ADDR_W{1'b0}};
+                r_search_state <= SEARCH_IDLE;
+              end
+              else
+              begin
+                r_search_slot  <= r_search_slot + 1'b1;
+                r_search_state <= SEARCH_SEC_SLOT;
+              end
+            end
+            default:
+              r_search_state <= SEARCH_IDLE;
           endcase
+        end
+
+        if (!w_start_search && (r_search_state == SEARCH_IDLE) &&
+            !i_alloc_head_req && !i_alloc_tail_req && !i_tail_update_req && !i_refresh_head_vld)
+        begin
+          if (!o_dequeue_req && r_deq_fallback_vld)
+          begin
+            o_dequeue_req      <= 1'b1;
+            o_flow_head        <= r_deq_fallback_word[ENTRY_HEAD_LSB +: 20];
+            r_read_entry_addr  <= r_deq_fallback_addr;
+            r_read_entry_word  <= r_deq_fallback_word;
+            r_deq_fallback_vld <= 1'b0;
+            r_deq_check_vld    <= 1'b0;
+            r_deq_wait_vld     <= 1'b0;
+            r_deq_scan_count   <= {(ENTRY_ADDR_W+1){1'b0}};
+          end
+          else if (!o_dequeue_req && r_deq_check_vld &&
+              w_entry_meets_threshold)
+          begin
+            o_dequeue_req     <= 1'b1;
+            o_flow_head       <= w_entry_head;
+            r_read_entry_addr <= r_deq_check_addr;
+            r_read_entry_word <= r_entry_rd_data;
+            r_deq_check_vld   <= 1'b0;
+            r_deq_wait_vld    <= 1'b0;
+            r_deq_scan_count  <= {(ENTRY_ADDR_W+1){1'b0}};
+            r_deq_fallback_vld <= 1'b0;
+          end
+          else if (!o_dequeue_req && r_deq_check_vld)
+          begin
+            r_deq_check_vld <= 1'b0;
+            if (r_deq_scan_count == NUM_ENTRY - 1)
+            begin
+              r_deq_scan_count   <= {(ENTRY_ADDR_W+1){1'b0}};
+              r_deq_fallback_vld <= 1'b0;
+              r_entry_rd_addr   <= r_deq_scan_addr;
+              r_deq_wait_addr   <= r_deq_scan_addr;
+              r_deq_wait_vld    <= 1'b1;
+              r_deq_scan_addr   <= next_ptr(r_deq_scan_addr);
+            end
+            else
+            begin
+              r_deq_scan_count <= r_deq_scan_count + 1'b1;
+              r_entry_rd_addr <= r_deq_scan_addr;
+              r_deq_wait_addr <= r_deq_scan_addr;
+              r_deq_wait_vld  <= 1'b1;
+              r_deq_scan_addr <= next_ptr(r_deq_scan_addr);
+            end
+          end
+          else if (!o_dequeue_req && r_deq_wait_vld)
+          begin
+            r_deq_check_addr <= r_deq_wait_addr;
+            r_deq_check_vld  <= 1'b1;
+            r_deq_wait_vld   <= 1'b0;
+          end
+          else if (!o_dequeue_req)
+          begin
+            r_entry_rd_addr   <= r_deq_scan_addr;
+            r_deq_wait_addr   <= r_deq_scan_addr;
+            r_deq_wait_vld    <= 1'b1;
+            r_deq_scan_addr   <= next_ptr(r_deq_scan_addr);
+          end
         end
       end
     end
