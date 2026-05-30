@@ -1,101 +1,89 @@
 # DFQ: Dynamic Per-Flow Queue Manager
 
-FPGA-based dynamic flow queue manager for TSN (Time-Sensitive Networking) switches.
+An FPGA-based dynamic per-flow queue manager for TSN switches.
 
-## Core Concept
+## Overview
 
-Traditional switches use **static queues** (8 hardware queues), where all traffic with the same priority shares a queue, making it impossible to isolate different flows.
+Traditional switches usually rely on fixed priority queues, where different flows with the same priority share the same hardware queue. This makes per-flow isolation difficult.
 
-DFQ uses **dynamic per-flow queues**: each flow has its own virtual queue, maintained via a CAM table that stores head/tail pointers and depth, enabling flow isolation and ordered scheduling.
+The core idea of DFQ is:
+
+- Use `flow_ID` as the key to maintain an independent virtual queue for each flow
+- Use `FMT` to track the head pointer, tail pointer, and depth of each flow
+- Use Pointer RAM to chain packet cells
+- Map PCP to priority levels and arbitrate before output
+
+This enables finer-grained queue management and scheduling in shared-buffer TSN designs.
+
+## Repository Layout
+
+This repository contains two implementations:
+
+| Directory | Description |
+|------|------|
+| `DFQ_CAM/` | Flow table implementation based on CAM / sequential matching |
+| `DFQ_Hash/` | Flow table implementation based on hash buckets |
+
+Both versions include the following core modules:
+
+| File | Description |
+|------|------|
+| `queue_manager.v` | Top-level module that connects enqueue, flow-table, dequeue, and arbitration logic |
+| `FMT.v` | Flow Mapping Table for flow lookup, allocation, and updates |
+| `dequeue_process.v` | Dequeue control logic |
+| `priority_arbiter.v` | Priority arbitration logic |
 
 ## Architecture
 
-```
-                    ┌─────────────────────────────┐
-                    │      queue_manager.v        │  ← Top-level
-                    │         (Top-level)         │
-                    └─────────────────────────────┘
-                                       │
-         ┌─────────────────────────────┼─────────────────────────────┐
-         │                             │                             │
-         ▼                             ▼                             ▼
-┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
-│    FMT.v        │          │  dequeue_process │          │ priority_arbiter│
-│  (CAM Manager)  │          │      .v         │          │     .v          │
-│                 │          │  (Dequeue FSM)  │          │                 │
-│ • 32-entry CAM │          │                 │          │ Lowest-set-bit  │
-│ • Flow search   │          │ • Read Pointer  │          │ Priority        │
-│ • Head/Tail ptr │          │   RAM           │          │ Arbitration     │
-└─────────────────┘          └─────────────────┘          └─────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Pointer RAM   │  ← Linked-list pointers for each queue
-└─────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│  PCP Queues (3) │  ← Output queues grouped by priority
-└─────────────────┘
+```text
+queue_manager
+├─ FMT                 // Flow table: lookup and head/tail/depth maintenance
+├─ Pointer RAM         // Linked-list pointer storage
+├─ dequeue_process     // Dequeue control
+└─ priority_arbiter    // Priority arbitration
 ```
 
 ## Priority Mapping
 
-| PCP | Priority Queue |
-|-----|----------------|
-| 0-3 | Queue 0 (Highest) |
-| 4-5 | Queue 1 |
-| 6-7 | Queue 2 (Lowest) |
+When `NUM_PRIORITY = 3`, the default PCP-to-priority mapping is:
 
-## Data Structures
+| PCP | Priority |
+|-----|----------|
+| 0-3 | 0 |
+| 4-5 | 1 |
+| 6-7 | 2 |
 
-### CAM Entry (77 bits)
-| Bits | Width | Description |
-|------|-------|-------------|
-| [76] | 1 | Valid bit |
-| [75:72] | 4 | Depth counter |
-| [71:40] | 32 | Flow ID |
-| [39:20] | 20 | Head pointer |
-| [19:0] | 20 | Tail pointer |
-
-### Metadata Special Bits
-| Bit | Description |
-|-----|-------------|
-| [15] | Tail flag - indicates end of queue |
-| [14] | Search control |
-
-## Interfaces
+## Top-Level Interface
 
 ### Enqueue
+
 ```verilog
-input  [31:0] flow_ID       // Flow identifier
-input  [ 2:0] PCP           // PCP priority
-input  [19:0] metadata_in   // Metadata
-input         metadata_in_wr // Enqueue write enable
-output        q_full         // Queue full flag
+input  [31:0] flow_ID
+input  [ 2:0] PCP
+input  [19:0] metadata_in
+input         metadata_in_wr
+output        q_full
 ```
 
 ### Dequeue
+
 ```verilog
-output        ptr_rdy        // Pointer ready
-input         metadata_out_rd // Dequeue read enable
-output [19:0] metadata_out   // Metadata output
+output        ptr_rdy
+input         metadata_out_rd
+output [19:0] metadata_out
 ```
 
 ## Usage
 
-1. **Initialization**: Provide `clk` and `reset` signals; the system auto-initializes the CAM table
-2. **Enqueue**: Drive `flow_ID` + `PCP` + `metadata_in`, then assert `metadata_in_wr`
-3. **Dequeue**: When `ptr_rdy` is high, assert `metadata_out_rd` to read `metadata_out`
+1. Provide `clk` and `reset` to initialize the module
+2. For enqueue, drive `flow_ID`, `PCP`, and `metadata_in`, then assert `metadata_in_wr`
+3. When `ptr_rdy` is high, assert `metadata_out_rd` to read `metadata_out`
 
-## File Descriptions
+## Use Cases
 
-| File | Description |
-|------|-------------|
-| queue_manager.v | Top-level module, connects all submodules |
-| FMT.v | CAM table manager - search/write/refresh operations |
-| dequeue_process.v | Dequeue FSM - pointer RAM traversal |
-| priority_arbiter.v | Priority arbiter - lowest-set-bit selection |
+- Shared-buffer management for TSN switches
+- Per-flow isolation with ordered dequeue
+- Parameterized queue management design for FPGA implementations
 
 ## Reference
 
